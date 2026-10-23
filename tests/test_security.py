@@ -20,10 +20,22 @@ from jarvis_gateway.server.server import UnifiedGatewayServer
 TOKEN = "secret123"
 
 
-def wait_for_port(port, timeout=10.0):
+def free_port():
+    """Ask the OS for an unused loopback port (CI runners may reserve fixed ports)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+PORT = free_port()
+
+
+def wait_for_port(port, timeout=10.0, startup_errors=None):
     """Wait until the in-process server is accepting connections."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if startup_errors:
+            pytest.fail(f"gateway failed to start: {startup_errors[0]!r}")
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.5):
                 return
@@ -37,7 +49,7 @@ def gateway():
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     cfg["gateway"].update({
         "host": "127.0.0.1",
-        "port": 19996,
+        "port": PORT,
         "auth_token": TOKEN,
         "enable_legacy_data_port": False,
     })
@@ -52,15 +64,13 @@ def gateway():
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
-    wait_for_port(19996)
-    if startup_errors:
-        pytest.fail(f"gateway failed to start: {startup_errors[0]!r}")
+    wait_for_port(PORT, startup_errors=startup_errors)
     yield server
     server.stop_services()
 
 
 def request(method, path, body=None, headers=None):
-    conn = http.client.HTTPConnection("127.0.0.1", 19996, timeout=5)
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
     conn.request(method, path, body=body, headers=headers or {})
     resp = conn.getresponse()
     payload = resp.read()
@@ -69,7 +79,7 @@ def request(method, path, body=None, headers=None):
 
 
 def test_status_is_not_readable_cross_origin(gateway):
-    conn = http.client.HTTPConnection("127.0.0.1", 19996, timeout=5)
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
     conn.request("GET", "/status", headers={
         "Origin": "https://evil.example",
         "Authorization": f"Bearer {TOKEN}",
@@ -87,7 +97,7 @@ def test_status_requires_auth_when_configured(gateway):
 
 
 def test_dns_rebinding_host_is_rejected(gateway):
-    conn = http.client.HTTPConnection("127.0.0.1", 19996, timeout=5)
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
     conn.putrequest("GET", "/status", skip_host=True)
     conn.putheader("Host", "evil.example.com")
     conn.endheaders()
@@ -115,9 +125,9 @@ def test_invalid_mode_is_rejected(gateway):
 
 
 def test_missing_content_length_is_411(gateway):
-    conn = http.client.HTTPConnection("127.0.0.1", 19996, timeout=5)
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
     conn.putrequest("POST", "/chat", skip_host=False)
-    conn.putheader("Host", "127.0.0.1:19996")
+    conn.putheader("Host", f"127.0.0.1:{PORT}")
     conn.putheader("X-Jarvis-Token", TOKEN)
     conn.endheaders()
     resp = conn.getresponse()
