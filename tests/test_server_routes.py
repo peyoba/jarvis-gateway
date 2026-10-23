@@ -66,7 +66,7 @@ def test_server_routes():
             assert resp.status == 200
             data = json.loads(resp.read().decode())
             assert data["status"] == "ready"
-            assert data["version"] == "2.3.0"
+            assert data["version"] == "2.3.1"
             assert data["root"] == "/tmp/jarvis-test-root"
 
         # 2. Status endpoint (requires auth because it may contain dictation text)
