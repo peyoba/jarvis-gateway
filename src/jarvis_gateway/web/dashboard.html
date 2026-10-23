@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis 网关控制台</title>
+<style>
+  :root{
+    --bg:#070b14; --panel:#0f172a; --panel2:#111c31; --line:#1e293b;
+    --text:#e2e8f0; --muted:#94a3b8; --faint:#64748b;
+    --ok:#34d399; --bad:#f87171; --warn:#fbbf24; --accent:#60a5fa;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    background:
+      radial-gradient(900px 500px at 15% -10%, rgba(96,165,250,.12), transparent 60%),
+      radial-gradient(800px 500px at 110% 10%, rgba(52,211,153,.08), transparent 55%),
+      var(--bg);
+  }
+  .wrap{max-width:1040px;margin:0 auto;padding:34px 22px 60px}
+  header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:24px}
+  h1{margin:0;font-size:26px;letter-spacing:2px;font-weight:800}
+  h1 span{font-size:14px;font-weight:500;letter-spacing:1px;color:var(--muted);margin-left:10px}
+  .sub{margin:8px 0 0;color:var(--faint);font-size:13px}
+  .pill{
+    display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border-radius:999px;
+    font-size:13px;border:1px solid var(--line);background:var(--panel);color:var(--muted);white-space:nowrap
+  }
+  .pill.ok{color:var(--ok);border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}
+  .pill.bad{color:var(--bad);border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.08)}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px}
+  .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  .card-top{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;margin-bottom:10px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--faint);box-shadow:0 0 0 3px rgba(100,116,139,.12)}
+  .dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(52,211,153,.14)}
+  .dot.bad{background:var(--bad);box-shadow:0 0 0 3px rgba(248,113,113,.14)}
+  .big{font-size:21px;font-weight:700;letter-spacing:.5px}
+  .small{margin-top:6px;font-size:12px;color:var(--faint);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .panel{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:14px}
+  .panel h2{margin:0 0 14px;font-size:14px;letter-spacing:1px;color:var(--muted);font-weight:600}
+  .hint{font-weight:400;font-size:12px;color:var(--faint);margin-left:8px;letter-spacing:0}
+  .modes{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .modes button{
+    text-align:left;cursor:pointer;padding:12px 13px;border-radius:11px;
+    border:1px solid var(--line);background:#0b1425;color:var(--text);
+    font-family:inherit;font-size:14px;font-weight:600;transition:.15s;
+  }
+  .modes button small{display:block;margin-top:5px;font-size:11px;font-weight:400;color:var(--faint);line-height:1.45}
+  .modes button:hover{border-color:#334155;transform:translateY(-1px)}
+  .modes button.active{border-color:rgba(96,165,250,.7);background:rgba(96,165,250,.12);box-shadow:0 0 0 1px rgba(96,165,250,.25) inset}
+  .modes button.active small{color:#bfdbfe}
+  
+  /* Virtual Mic styles */
+  .mic-container{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .mic-btn{
+    cursor:pointer;padding:10px 18px;border-radius:10px;border:1px solid var(--accent);
+    background:rgba(96,165,250,.15);color:var(--text);font-family:inherit;font-size:13px;
+    font-weight:600;transition:.15s;display:inline-flex;align-items:center;gap:8px;user-select:none;
+  }
+  .mic-btn:hover{background:rgba(96,165,250,.25)}
+  .mic-btn.recording{background:rgba(248,113,113,.25);border-color:var(--bad);color:var(--bad);animation:pulse 1s infinite}
+  @keyframes pulse { 0%{opacity:1} 50%{opacity:0.6} 100%{opacity:1} }
+  .mic-tip{font-size:12px;color:var(--faint)}
+
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  .grid4 div{display:flex;flex-direction:column;gap:7px}
+  .grid4 span{font-size:12px;color:var(--faint)}
+  .grid4 strong{font-size:15px;font-weight:600;word-break:break-all}
+  .table-head,.row{display:grid;grid-template-columns:74px 64px 1.1fr 1.5fr 62px;gap:10px;align-items:center}
+  .table-head{padding:0 10px 9px;font-size:11px;color:var(--faint);border-bottom:1px solid var(--line);letter-spacing:.5px}
+  .recent{max-height:320px;overflow:auto}
+  .row{padding:10px;border-bottom:1px solid rgba(30,41,59,.55);font-size:13px}
+  .row:last-child{border-bottom:none}
+  .row .t{color:var(--faint);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .row .m{font-size:11px;color:#bfdbfe;background:rgba(96,165,250,.1);border:1px solid rgba(96,165,250,.2);border-radius:6px;padding:2px 6px;text-align:center}
+  .row .h{color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .r{color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .e{color:var(--faint);text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .row.miss .m{color:var(--warn);background:rgba(251,191,36,.1);border-color:rgba(251,191,36,.25)}
+  .row.error .m{color:var(--bad);background:rgba(248,113,113,.1);border-color:rgba(248,113,113,.25)}
+  .empty{padding:26px 10px;text-align:center;color:var(--faint);font-size:13px}
+  footer{margin-top:24px;color:var(--faint);font-size:12px;line-height:1.9}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#0b1425;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#cbd5e1}
+  @media (max-width:760px){
+    .cards,.grid4{grid-template-columns:1fr 1fr}
+    .modes{grid-template-columns:1fr 1fr}
+    .table-head{display:none}
+    .row{grid-template-columns:64px 56px 1fr;grid-auto-rows:auto}
+    .row .r{grid-column:1 / -1;white-space:normal}
+    .row .e{display:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>JARVIS<span>Mac 网关控制台 v2.3</span></h1>
+      <p class="sub">通用开源版 · 局域网物理语音伴侣与电脑控制中枢</p>
+    </div>
+    <div id="health" class="pill">连接中…</div>
+  </header>
+
+  <section class="cards">
+    <div class="card">
+      <div class="card-top"><span class="dot" id="dot-gw"></span>核心网关 <span id="gw-port">:18888</span></div>
+      <div class="big" id="gw-state">—</div>
+      <div class="small" id="gw-meta">—</div>
+    </div>
+    <div class="card">
+      <div class="card-top"><span class="dot" id="dot-asr"></span>Whisper 识别 :18889</div>
+      <div class="big" id="asr-state">—</div>
+      <div class="small" id="asr-meta">—</div>
+    </div>
+    <div class="card">
+      <div class="card-top"><span class="dot" id="dot-data"></span>数据接口 <span id="data-port"></span></div>
+      <div class="big" id="data-state">—</div>
+      <div class="small" id="data-meta">—</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>输入模式<span class="hint">点击即可切换，约 2 秒同步到硬件伴侣</span></h2>
+    <div class="modes" id="modes">
+      <button data-mode="auto">智能分流<small>短按原字 · 长按润色</small></button>
+      <button data-mode="raw">极速原字<small>听到什么打什么</small></button>
+      <button data-mode="polish">AI 润色<small>去口癖 · 补标点</small></button>
+      <button data-mode="dialog">智能问答<small>对话 + 电脑控制</small></button>
+    </div>
+  </section>
+
+  <!-- Virtual Browser Mic Panel for Hardware-Free Testing -->
+  <section class="panel">
+    <h2>网页麦克风调试<span class="hint">免硬件快速体验：按住说话，松开后自动转写并键入 Mac 光标（浏览器内采样为 16 kHz PCM）</span></h2>
+    <div class="mic-container">
+      <button id="btn-mic" class="mic-btn">🎙️ 按住说话 (或按住空格)</button>
+      <span id="mic-status" class="mic-tip">准备就绪（需浏览器麦克风权限）</span>
+    </div>
+  </section>
+
+  <section class="panel grid4">
+    <div><span>Mac 局域网地址</span><strong id="ip">—</strong></div>
+    <div><span>已运行</span><strong id="uptime">—</strong></div>
+    <div><span>今日 Token</span><strong id="tokens">—</strong></div>
+    <div><span>天气</span><strong id="weather">—</strong></div>
+  </section>
+
+  <section class="panel">
+    <h2>最近对话<span class="hint">每 3 秒自动刷新</span></h2>
+    <div class="table-head"><span>时间</span><span>模式</span><span>听到</span><span>回复 / 上屏</span><span>耗时</span></div>
+    <div id="recent" class="recent"><div class="empty">还没有对话，按住板子或在上方网页录音试试。</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>访问令牌<span class="hint">如果 config.json 配置了 gateway.auth_token，请填写后才能录音与切换模式</span></h2>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <input id="auth-token" type="password" placeholder="可选：Bearer / X-Jarvis-Token" autocomplete="off"
+             style="flex:1;min-width:240px;padding:10px 12px;border-radius:10px;border:1px solid #3a3f4b;background:#171a21;color:#e8eaf0">
+      <button id="save-token" style="padding:10px 16px;border-radius:10px;border:0;cursor:pointer">保存到本机</button>
+      <span id="token-status" class="hint">未设置</span>
+    </div>
+  </section>
+
+  <footer>
+    网关 <code id="addr">—</code> · 对话日志 <code>logs/jarvis_gateway.log</code><br>
+    默认仅监听 <code>127.0.0.1</code>。需要板子或手机访问时，把 <code>config.json</code> 的 <code>gateway.host</code> 改为 <code>0.0.0.0</code>，并设置 <code>auth_token</code>。
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(id){ return document.getElementById(id); };
+  var MODE_LABEL = { auto:"分流", raw:"原字", polish:"润色", dialog:"问答" };
+  var currentGatewayMode = "auto";
+
+  // Optional auth token (config.json gateway.auth_token). Stored locally only.
+  function getToken(){
+    try { return localStorage.getItem("jarvis_token") || ""; } catch(e){ return ""; }
+  }
+  function authHeaders(extra){
+    var h = extra || {};
+    var t = getToken();
+    if (t) h["X-Jarvis-Token"] = t;
+    return h;
+  }
+  function apiFetch(url, opts){
+    opts = opts || {};
+    opts.headers = authHeaders(opts.headers);
+    opts.cache = "no-store";
+    return fetch(url, opts);
+  }
+
+  function setDot(el, ok){
+    el.className = "dot " + (ok ? "ok" : "bad");
+  }
+  function fmtUptime(sec){
+    sec = Math.max(0, sec|0);
+    var d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600),
+        m = Math.floor(sec%3600/60), s = sec%60;
+    if (d) return d + " 天 " + h + " 小时";
+    if (h) return h + " 小时 " + m + " 分";
+    if (m) return m + " 分 " + s + " 秒";
+    return s + " 秒";
+  }
+  function rowCell(cls, text){
+    var el = document.createElement("span");
+    el.className = cls;
+    el.textContent = text;
+    return el;
+  }
+
+  function render(d){
+    var gw = d.gateway || {}, asr = d.whisper || {}, data = d.data || {};
+    var gwPort = gw.port || 18888;
+    currentGatewayMode = gw.mode || "auto";
+
+    setDot($("dot-gw"), !!gw.online);
+    $("gw-state").textContent = gw.online ? "在线" : "离线";
+    $("gw-port").textContent = ":" + gwPort;
+    $("gw-meta").textContent = "PID " + (gw.pid || "-") + " · 端口 " + gwPort;
+
+    setDot($("dot-asr"), !!asr.online);
+    $("asr-state").textContent = asr.online ? "已就绪" : "未启动";
+    $("asr-meta").textContent = "端口 " + (asr.port || 18889) + (asr.online ? " · 模型常驻" : " · 正在预热");
+
+    setDot($("dot-data"), !!data.online);
+    $("data-state").textContent = data.online ? "在线" : "离线";
+    $("data-port").textContent = ":" + (data.port || gw.port || 18888);
+    $("data-meta").textContent = (data.legacy_enabled ? "兼容端口 " : "主端口 ") + (data.port || gwPort) + " · " + (data.tokens_str || "--");
+
+    var btns = document.querySelectorAll("#modes button");
+    for (var i = 0; i < btns.length; i++){
+      btns[i].classList.toggle("active", btns[i].getAttribute("data-mode") === gw.mode);
+    }
+
+    $("ip").textContent = (d.lan_ip || "-") + ":" + gwPort;
+    $("uptime").textContent = fmtUptime(gw.uptime || 0);
+    $("tokens").textContent = (data.tokens_str || "--") + " Token";
+    $("weather").textContent = data.weather || "--";
+    $("addr").textContent = "http://" + (d.lan_ip || "127.0.0.1") + ":" + gwPort + "/";
+
+    var box = $("recent");
+    box.textContent = "";
+    var list = d.recent || [];
+    if (!list.length){
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "还没有对话，按住板子或在上方网页录音试试。";
+      box.appendChild(empty);
+    } else {
+      for (var j = 0; j < list.length; j++){
+        var r = list[j];
+        var row = document.createElement("div");
+        row.className = "row" + (r.kind === "miss" ? " miss" : (r.kind === "error" ? " error" : ""));
+
+        var time = new Date((r.ts || 0) * 1000);
+        row.appendChild(rowCell("t", time.toLocaleTimeString("zh-CN", { hour12:false })));
+        row.appendChild(rowCell("m", MODE_LABEL[r.mode] || r.mode || "-"));
+        row.appendChild(rowCell("h", r.heard || "…"));
+        row.appendChild(rowCell("r", r.typed ? "⌨ " + r.typed : (r.reply || "…")));
+        row.appendChild(rowCell("e", (r.elapsed || 0).toFixed(2) + "s"));
+        box.appendChild(row);
+      }
+    }
+
+    $("health").textContent = "运行中";
+    $("health").className = "pill ok";
+  }
+
+  async function refresh(){
+    try{
+      var res = await apiFetch("/status");
+      if (res.status === 401) throw new Error("需要访问令牌");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      render(await res.json());
+    }catch(err){
+      $("health").textContent = err.message === "需要访问令牌" ? "需要访问令牌：请在下方填写" : "网关未响应";
+      $("health").className = "pill bad";
+      setDot($("dot-gw"), false);
+      $("gw-state").textContent = "离线";
+      $("gw-meta").textContent = "请确认 ./jarvis start 已运行";
+    }
+  }
+
+  var btns = document.querySelectorAll("#modes button");
+  for (var k = 0; k < btns.length; k++){
+    btns[k].addEventListener("click", async function(e){
+      var mode = e.currentTarget.getAttribute("data-mode");
+      try{
+        var res = await apiFetch("/mode?set=" + encodeURIComponent(mode), { method: "POST" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+      }catch(err){
+        $("health").textContent = "切换模式失败: " + err.message;
+        $("health").className = "pill bad";
+      }
+      refresh();
+    });
+  }
+
+  // --- Browser Virtual Microphone: capture raw 16 kHz / 16-bit / mono PCM ---
+  // The gateway expects headerless PCM. MediaRecorder produces WebM/Opus, so we
+  // resample the AudioContext stream ourselves before uploading.
+  var micBtn = $("btn-mic");
+  var micStatus = $("mic-status");
+  var audioCtx = null, micStream = null, sourceNode = null, processorNode = null, muteNode = null;
+  var floatChunks = [];
+  var isRecording = false;
+
+  function downsampleTo16k(input, inRate){
+    var outRate = 16000;
+    if (inRate === outRate) return input;
+    var ratio = inRate / outRate;
+    var outLen = Math.max(1, Math.floor(input.length / ratio));
+    var out = new Float32Array(outLen);
+    for (var i = 0; i < outLen; i++){
+      var start = Math.floor(i * ratio);
+      var end = Math.min(Math.floor((i + 1) * ratio), input.length);
+      var sum = 0, n = 0;
+      for (var j = start; j < end; j++){ sum += input[j]; n++; }
+      out[i] = n ? sum / n : 0;
+    }
+    return out;
+  }
+
+  function floatToInt16(input){
+    var out = new Int16Array(input.length);
+    for (var i = 0; i < input.length; i++){
+      var v = Math.max(-1, Math.min(1, input[i]));
+      out[i] = v < 0 ? v * 0x8000 : v * 0x7FFF;
+    }
+    return out;
+  }
+
+  async function startRecording(){
+    if (isRecording) return;
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      floatChunks = [];
+      sourceNode = audioCtx.createMediaStreamSource(micStream);
+      processorNode = audioCtx.createScriptProcessor(4096, 1, 1);
+      processorNode.onaudioprocess = function(ev){
+        floatChunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+      };
+      // ScriptProcessor only runs when connected to the destination; keep it silent.
+      muteNode = audioCtx.createGain();
+      muteNode.gain.value = 0;
+      sourceNode.connect(processorNode);
+      processorNode.connect(muteNode);
+      muteNode.connect(audioCtx.destination);
+
+      isRecording = true;
+      micBtn.classList.add("recording");
+      micBtn.textContent = "🔴 松开完成录音...";
+      micStatus.textContent = "正在录音（16 kHz PCM），请清晰口述...";
+    } catch(err){
+      micStatus.textContent = "获取麦克风失败: " + err.message;
+      cleanupMic();
+    }
+  }
+
+  function cleanupMic(){
+    if (processorNode){ try { processorNode.disconnect(); } catch(e){} processorNode = null; }
+    if (sourceNode){ try { sourceNode.disconnect(); } catch(e){} sourceNode = null; }
+    if (muteNode){ try { muteNode.disconnect(); } catch(e){} muteNode = null; }
+    if (micStream){ micStream.getTracks().forEach(function(t){ t.stop(); }); micStream = null; }
+    if (audioCtx){ try { audioCtx.close(); } catch(e){} audioCtx = null; }
+  }
+
+  function concatFloat(chunks){
+    var total = 0, i;
+    for (i = 0; i < chunks.length; i++) total += chunks[i].length;
+    var out = new Float32Array(total), offset = 0;
+    for (i = 0; i < chunks.length; i++){ out.set(chunks[i], offset); offset += chunks[i].length; }
+    return out;
+  }
+
+  async function stopRecording(){
+    if (!isRecording) return;
+    isRecording = false;
+    micBtn.classList.remove("recording");
+    micBtn.textContent = "🎙️ 按住说话 (或按住空格)";
+
+    var inRate = audioCtx ? audioCtx.sampleRate : 48000;
+    var samples = concatFloat(floatChunks);
+    floatChunks = [];
+    cleanupMic();
+
+    if (samples.length < 1600){ // < 0.1 s
+      micStatus.textContent = "录音太短，请按住多说一会儿。";
+      return;
+    }
+
+    var pcm = floatToInt16(downsampleTo16k(samples, inRate));
+    micStatus.textContent = "正在处理识别与注入...";
+    try {
+      var res = await apiFetch("/chat?mode=" + encodeURIComponent(currentGatewayMode), {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: pcm.buffer
+      });
+      if (res.ok){
+        micStatus.textContent = "已完成！查看控制台或光标处文本";
+        refresh();
+      } else {
+        var detail = "";
+        try { detail = (await res.json()).error || ""; } catch(e){}
+        micStatus.textContent = "请求失败 HTTP " + res.status + (detail ? " · " + detail : "");
+      }
+    } catch(err){
+      micStatus.textContent = "发送异常: " + err.message;
+    }
+  }
+
+  var tokenInput = $("auth-token");
+  if (tokenInput){
+    tokenInput.value = getToken();
+    $("token-status").textContent = tokenInput.value ? "已设置" : "未设置";
+    $("save-token").addEventListener("click", function(){
+      try {
+        if (tokenInput.value) localStorage.setItem("jarvis_token", tokenInput.value.trim());
+        else localStorage.removeItem("jarvis_token");
+        $("token-status").textContent = tokenInput.value ? "已设置" : "未设置";
+      } catch(e){}
+      refresh();
+    });
+  }
+
+  micBtn.addEventListener("mousedown", startRecording);
+  window.addEventListener("mouseup", stopRecording);
+  micBtn.addEventListener("touchstart", function(e){ e.preventDefault(); startRecording(); });
+  window.addEventListener("touchend", stopRecording);
+
+  // Spacebar push-to-talk support (when not in input)
+  window.addEventListener("keydown", function(e){
+    if (e.code === "Space" && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !isRecording){
+      e.preventDefault();
+      startRecording();
+    }
+  });
+  window.addEventListener("keyup", function(e){
+    if (e.code === "Space" && isRecording){
+      e.preventDefault();
+      stopRecording();
+    }
+  });
+
+  refresh();
+  setInterval(refresh, 3000);
+})();
+</script>
+</body>
+</html>

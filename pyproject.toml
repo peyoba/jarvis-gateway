@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-gateway"
+version = "2.3.0"
+description = "The Open-Source Local AI Desktop Brain & Voice-Typing Gateway for Hardware Companions (ESP32, IoT & Beyond)."
+readme = "README.md"
+authors = [{ name = "Jarvis Contributors" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["jarvis", "esp32", "ai", "whisper", "voice-typing", "macos", "iot"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "openai>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+jarvis-gateway = "jarvis_gateway.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["jarvis_gateway*"]
+
+[tool.setuptools.package-data]
+jarvis_gateway = ["web/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 110
+exclude = ["build", "app"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

@@ -1,0 +1,45 @@
+# Local configuration with secrets
+config.json
+*.local.json
+
+# Runtime logs and PIDs
+logs/
+run/
+autostart/*.plist
+*.log
+*.pid
+
+# Python virtual environment and caches
+venv/
+env/
+.venv/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/lib*/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local archive (internal notes, not part of the public docs)
+docs/archive/
+
+# Temporary audio artifacts
+*.wav
+*.pcm
+*.bak
+
+# macOS App build artifacts
+build/.modulecache/
+build/Jarvis.iconset/
+build/icon_1024.png
+Jarvis.app/
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride

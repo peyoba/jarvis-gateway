@@ -1,0 +1,607 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Jarvis Gateway 启动器
+=====================
+
+一条命令管理 Whisper 识别服务与网关（数据服务内置于网关）：
+    ./jarvis start     启动（默认等待识别模型预热）
+    ./jarvis stop      停止
+    ./jarvis restart   重启
+    ./jarvis status    查看状态
+    ./jarvis open      打开浏览器控制台
+    ./jarvis logs      跟踪日志
+    ./jarvis autostart 开机自启（on/off/status）
+    ./jarvis doctor    环境自检
+
+只依赖 Python 标准库，可在任意 Python 3.9+ 下运行；
+实际服务进程使用项目内的 venv（若存在）。
+"""
+
+import argparse
+import json
+import os
+import plistlib
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+APP_DIR = ROOT / "app"
+LOG_DIR = ROOT / "logs"
+RUN_DIR = ROOT / "run"
+CONFIG_PATH = ROOT / "config.json"
+
+VENV_PY = ROOT / "venv" / "bin" / "python"
+if not VENV_PY.exists():
+    VENV_PY = Path(sys.executable)
+
+LABEL = "ai.jarvis.gateway"
+PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+DEFAULTS = {
+    "gateway": {
+        "host": "127.0.0.1",
+        "port": 18888,
+        "auth_token": "",
+        "allowed_hosts": [],
+        "enable_legacy_data_port": False,
+    },
+    "whisper": {
+        "cli_bin": "/opt/homebrew/bin/whisper-cli",
+        "server_bin": "/opt/homebrew/bin/whisper-server",
+        "model": "~/.cache/whisper/ggml-small-q5_1.bin",
+        "port": 18889,
+        "language": "zh",
+        "prompt": "以下是普通话简体中文语音输入。",
+        "beam_size": 2,
+    },
+    "typing": {"default_mode": "auto"},
+    "data_service": {
+        "port": 8080,
+        "opentoken_bin": "~/.local/bin/opentoken",
+        "weather_city": "Beijing",
+        "weather_label": "北京",
+    },
+}
+
+USE_COLOR = sys.stdout.isatty()
+GREEN = "\033[32m" if USE_COLOR else ""
+YELLOW = "\033[33m" if USE_COLOR else ""
+RED = "\033[31m" if USE_COLOR else ""
+DIM = "\033[2m" if USE_COLOR else ""
+RESET = "\033[0m" if USE_COLOR else ""
+
+
+# --------------------------------------------------------------------------- #
+# 基础工具
+# --------------------------------------------------------------------------- #
+
+def _merge(base, override):
+    out = dict(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _legacy_enabled(cfg):
+    return bool(cfg.get("gateway", {}).get("enable_legacy_data_port", False))
+
+
+def _data_port(cfg):
+    return int(cfg.get("data_service", {}).get("port", 8080))
+
+
+def load_config():
+    """Load config via the package loader so CLI and server never drift apart."""
+    try:
+        sys.path.insert(0, str(ROOT / "src"))
+        from jarvis_gateway.config import load_config as shared_load_config
+
+        return shared_load_config(CONFIG_PATH)
+    except Exception:
+        pass
+
+    # Fallback for a checkout where the package is not importable yet.
+    cfg = json.loads(json.dumps(DEFAULTS))
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = _merge(cfg, json.load(f))
+        except Exception as e:
+            print(f"{YELLOW}警告：config.json 解析失败（{e}），使用默认配置{RESET}")
+    else:
+        print(f"{YELLOW}警告：没有找到 config.json，使用默认配置{RESET}")
+    return cfg
+
+
+def port_alive(port, host="127.0.0.1", timeout=0.3):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def http_json(url, timeout=1.5):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def port_pids(port):
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def pid_command(pid):
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=3,
+        )
+        return out.stdout.strip()
+    except Exception:
+        return ""
+
+
+def stop_port(port, label, expect=("jarvis", "whisper", "token_usage")):
+    pids = port_pids(port)
+    if not pids:
+        return False
+
+    targets = []
+    for pid in pids:
+        cmd = pid_command(pid).lower()
+        # 查不到命令行时（某些受限环境 ps 不可用）按“自己的端口”处理；
+        # 查得到但不认识时才跳过，避免误杀别人的服务。
+        if cmd and not any(token in cmd for token in expect):
+            print(f"{YELLOW}跳过端口 {port} 上的进程 PID {pid}（不认识：{cmd[:80]}）{RESET}")
+            continue
+        targets.append(pid)
+
+    if not targets:
+        return False
+
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    for _ in range(50):
+        if not port_alive(port):
+            break
+        time.sleep(0.1)
+
+    for pid in port_pids(port):
+        if pid in targets:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    print(f"  已停止 {label}（PID {', '.join(map(str, targets))}）")
+    return True
+
+
+def wait_for_port(port, timeout, label):
+    started = time.time()
+    while time.time() - started < timeout:
+        if port_alive(port):
+            return time.time() - started
+        time.sleep(0.4)
+    print(f"{YELLOW}  {label} 在 {timeout}s 内未就绪{RESET}")
+    return None
+
+
+def spawn(cmd, log_name, env=None):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / log_name
+    # Keep logs from growing without bound on always-on machines.
+    try:
+        if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
+            log_path.replace(log_path.with_suffix(log_path.suffix + ".1"))
+    except OSError:
+        pass
+    handle = open(log_path, "ab", buffering=0)
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=env,
+        )
+    finally:
+        handle.close()
+    return proc, log_path
+
+
+def gateway_url(cfg):
+    return f"http://127.0.0.1:{cfg['gateway']['port']}/"
+
+
+# --------------------------------------------------------------------------- #
+# 命令实现
+# --------------------------------------------------------------------------- #
+
+def cmd_start(cfg, open_panel=False, wait=True):
+    gw_port = int(cfg["gateway"]["port"])
+    wh_port = int(cfg["whisper"]["port"])
+    legacy = _legacy_enabled(cfg)
+    ds_port = _data_port(cfg) if legacy else 0
+
+    ping = http_json(f"http://127.0.0.1:{gw_port}/ping")
+    if ping and ping.get("root") == str(ROOT):
+        print(f"{GREEN}✓ 网关已经在运行{RESET}  {gateway_url(cfg)}")
+        if wait and port_alive(wh_port):
+            print(f"{GREEN}✓ 识别服务在线{RESET}")
+        if open_panel:
+            open_dashboard(cfg)
+        return 0
+
+    if ping:
+        print(f"{YELLOW}发现另一个位置的 Jarvis 正在运行（{ping.get('root', '未知')}），先停止它...{RESET}")
+        stop_port(gw_port, "旧网关")
+
+    # 清理残留（端口被占但网关没响应，通常是上次异常退出）
+    stop_port(gw_port, "旧网关")
+    stop_port(wh_port, "旧识别服务")
+    if legacy:
+        stop_port(ds_port, "旧数据服务")
+
+    server_bin = Path(os.path.expanduser(cfg["whisper"]["server_bin"]))
+    model_path = Path(os.path.expanduser(cfg["whisper"]["model"]))
+    if not server_bin.exists():
+        print(f"{RED}✗ 找不到 whisper-server：{server_bin}{RESET}")
+        print("  请先执行：brew install whisper.cpp")
+        return 1
+    if not model_path.exists():
+        print(f"{RED}✗ 找不到 Whisper 模型：{model_path}{RESET}")
+        print("  请把 ggml-small-q5_1.bin 放到该路径，或修改 config.json 的 whisper.model")
+        return 1
+
+    print(f"{DIM}使用 Python: {VENV_PY}{RESET}")
+    print(f"[1/2] 启动识别服务 :{wh_port} ...")
+    whisper_cmd = [
+        str(server_bin),
+        "-m", str(model_path),
+        "--host", "127.0.0.1",
+        "--port", str(wh_port),
+        "-l", str(cfg["whisper"].get("language", "zh")),
+        "-bs", str(cfg["whisper"].get("beam_size", 2)),
+        "-nt",
+        "--prompt", str(cfg["whisper"].get("prompt", "")),
+    ]
+    whisper_proc, whisper_log = spawn(whisper_cmd, "whisper_server.log")
+
+    print(f"[2/2] 启动核心网关与内置服务 :{gw_port} ...")
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    gw_proc, gw_log = spawn([str(VENV_PY), str(APP_DIR / "jarvis_gateway.py")],
+                            "jarvis_gateway.log", env=env)
+
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    for name, proc in (("whisper", whisper_proc), ("gateway", gw_proc)):
+        (RUN_DIR / f"{name}.pid").write_text(str(proc.pid), encoding="utf-8")
+
+    gw_elapsed = wait_for_port(gw_port, 10, "网关")
+    if gw_elapsed is None:
+        print(f"{RED}✗ 网关启动失败，请查看：{gw_log}{RESET}")
+        return 1
+
+    if wait:
+        print(f"{DIM}等待识别模型预热（首次约 15~25 秒，之后很快）...{RESET}")
+        wh_elapsed = wait_for_port(wh_port, 45, "识别服务")
+        if wh_elapsed is not None:
+            print(f"{GREEN}✓ 识别服务就绪（{wh_elapsed:.1f}s）{RESET}")
+        if legacy:
+            ds_elapsed = wait_for_port(ds_port, 10, "兼容数据端口")
+            if ds_elapsed is not None:
+                print(f"{GREEN}✓ 兼容数据端口就绪（{ds_elapsed:.1f}s）{RESET}")
+
+    print(f"{GREEN}✓ Jarvis 已启动{RESET}")
+    print(f"  控制台  {gateway_url(cfg)}")
+    print(f"  日志    {LOG_DIR}")
+    if open_panel:
+        open_dashboard(cfg)
+    return 0
+
+
+def cmd_stop(cfg):
+    gw_port = int(cfg["gateway"]["port"])
+    wh_port = int(cfg["whisper"]["port"])
+    legacy = _legacy_enabled(cfg)
+    ds_port = _data_port(cfg)
+
+    print("正在停止 Jarvis ...")
+    stopped = False
+    stopped |= stop_port(gw_port, "网关")
+    stopped |= stop_port(wh_port, "识别服务")
+    if legacy:
+        stopped |= stop_port(ds_port, "数据服务")
+
+    for pid_file in RUN_DIR.glob("*.pid"):
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+
+    if stopped:
+        print(f"{GREEN}✓ 已全部停止{RESET}")
+    else:
+        print(f"{DIM}没有发现正在运行的 Jarvis 服务{RESET}")
+    return 0
+
+
+def fmt_uptime(seconds):
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}天{hours}小时"
+    if hours:
+        return f"{hours}小时{minutes}分"
+    if minutes:
+        return f"{minutes}分{secs}秒"
+    return f"{secs}秒"
+
+
+def cmd_status(cfg):
+    gw_port = int(cfg["gateway"]["port"])
+    wh_port = int(cfg["whisper"]["port"])
+    legacy = _legacy_enabled(cfg)
+    ds_port = _data_port(cfg)
+
+    gw_ping = http_json(f"http://127.0.0.1:{gw_port}/ping")
+    status = http_json(f"http://127.0.0.1:{gw_port}/status") if gw_ping else None
+
+    def line(name, ok, detail):
+        mark = f"{GREEN}✓ 在线{RESET}" if ok else f"{RED}✗ 离线{RESET}"
+        print(f"  {name:<6} {mark}  {detail}")
+
+    print("Jarvis Gateway 状态")
+    print("-" * 58)
+    if gw_ping:
+        pid = status["gateway"]["pid"] if status else "-"
+        up = fmt_uptime(status["gateway"]["uptime"]) if status else "-"
+        line("网关", True, f":{gw_port}  PID {pid}  运行 {up}")
+    else:
+        line("网关", False, f":{gw_port}")
+
+    wh_pids = port_pids(wh_port)
+    line("识别", bool(wh_pids), f":{wh_port}" + (f"  PID {wh_pids[0]}" if wh_pids else "  未启动"))
+
+    if legacy:
+        ds_pids = port_pids(ds_port)
+        line("数据", bool(ds_pids), f":{ds_port}" + (f"  PID {ds_pids[0]}" if ds_pids else "  未启动"))
+    else:
+        line("数据", True, "已合并进主端口 :%d" % gw_port)
+
+    if status:
+        print("-" * 58)
+        mode = status["gateway"]["mode"]
+        tokens = status["data"].get("tokens_str", "--")
+        weather = status["data"].get("weather", "--")
+        print(f"  模式    {mode}")
+        print(f"  Token   {tokens}")
+        print(f"  天气    {weather}")
+        print(f"  对话    {status['stats']['turns']} 轮（本次启动）")
+        print(f"  面板    {gateway_url(cfg)}")
+    return 0 if gw_ping else 1
+
+
+def open_dashboard(cfg):
+    url = gateway_url(cfg)
+    print(f"打开控制台 {url}")
+    subprocess.run(["open", url], check=False)
+
+
+def cmd_logs(cfg, which, follow):
+    mapping = {
+        "gateway": "jarvis_gateway.log",
+        "whisper": "whisper_server.log",
+        # Data collection is embedded in the gateway process now.
+        "data": "jarvis_gateway.log",
+    }
+    if which not in mapping:
+        print(f"可用日志：{', '.join(mapping)}")
+        return 1
+    path = LOG_DIR / mapping[which]
+    if not path.exists():
+        print(f"日志还不存在：{path}")
+        return 1
+    cmd = ["tail", "-n", "100"]
+    if follow:
+        cmd.append("-f")
+    cmd.append(str(path))
+    os.execvp("tail", cmd)
+
+
+def cmd_autostart(cfg, action):
+    if action == "status":
+        loaded = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+        present = LABEL in loaded.stdout
+        exists = PLIST_PATH.exists()
+        print(f"配置文件  {'✓' if exists else '✗'}  {PLIST_PATH}")
+        print(f"已加载    {'✓' if present else '✗'}")
+        return 0
+
+    if action == "off":
+        if PLIST_PATH.exists():
+            subprocess.run(["launchctl", "unload", "-w", str(PLIST_PATH)],
+                           capture_output=True, text=True)
+            try:
+                PLIST_PATH.unlink()
+            except OSError as e:
+                print(f"{YELLOW}配置文件删除失败（{e}），请手动删除：{PLIST_PATH}{RESET}")
+                return 1
+            print(f"{GREEN}✓ 已关闭开机自启{RESET}")
+        else:
+            print("本来就没有开启")
+        return 0
+
+    PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "Label": LABEL,
+        "ProgramArguments": [str(VENV_PY), str(ROOT / "jarvis"), "start", "--no-wait"],
+        "WorkingDirectory": str(ROOT),
+        "RunAtLoad": True,
+        "KeepAlive": False,
+        "StandardOutPath": str(LOG_DIR / "autostart.log"),
+        "StandardErrorPath": str(LOG_DIR / "autostart.log"),
+        "EnvironmentVariables": {
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "PYTHONUNBUFFERED": "1",
+        },
+    }
+
+    try:
+        with open(PLIST_PATH, "wb") as f:
+            plistlib.dump(payload, f)
+    except OSError as e:
+        fallback = ROOT / "autostart" / f"{LABEL}.plist"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        with open(fallback, "wb") as f:
+            plistlib.dump(payload, f)
+        print(f"{RED}✗ 无法写入 {PLIST_PATH}（{e}）{RESET}")
+        print(f"已把配置文件生成到：{fallback}")
+        print("请在该项目目录的「终端」里手动执行：")
+        print(f'  cp "{fallback}" ~/Library/LaunchAgents/')
+        print(f"  launchctl load -w ~/Library/LaunchAgents/{LABEL}.plist")
+        return 1
+
+    subprocess.run(["launchctl", "unload", str(PLIST_PATH)], capture_output=True, text=True)
+    result = subprocess.run(["launchctl", "load", "-w", str(PLIST_PATH)],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"{RED}✗ 加载失败：{result.stderr.strip()}{RESET}")
+        return 1
+    print(f"{GREEN}✓ 已开启开机自启{RESET}（下次登录自动运行）")
+    print(f"  {PLIST_PATH}")
+    return 0
+
+
+def cmd_doctor(cfg):
+    print("Jarvis 环境自检")
+    print("-" * 58)
+    ok = True
+
+    def check(label, condition, hint=""):
+        nonlocal ok
+        print(f"  {'✓' if condition else '✗'} {label}" + (f"  {DIM}{hint}{RESET}" if hint else ""))
+        if not condition:
+            ok = False
+
+    check("Python venv", VENV_PY.exists(), str(VENV_PY))
+    check("网关脚本", (APP_DIR / "jarvis_gateway.py").exists())
+    check("控制台页面", (ROOT / "src" / "jarvis_gateway" / "web" / "dashboard.html").exists())
+    check("配置文件", CONFIG_PATH.exists(), str(CONFIG_PATH))
+    check("whisper-server", Path(os.path.expanduser(cfg["whisper"]["server_bin"])).exists(),
+          cfg["whisper"]["server_bin"])
+    check("Whisper 模型", Path(os.path.expanduser(cfg["whisper"]["model"])).exists(),
+          cfg["whisper"]["model"])
+    ot_bin = str(cfg["data_service"].get("opentoken_bin", ""))
+    has_ot = bool(shutil.which("opentoken") or (ot_bin and Path(os.path.expanduser(ot_bin)).exists()))
+    check("opentoken (可选)", has_ot, ot_bin if has_ot else "未安装（将自动启用内置本地估算器）")
+    primary = cfg["llm"]["primary"]
+    check("主模型配置", bool(primary.get("api_key") and primary.get("base_url")),
+          primary.get("name", ""))
+    gw = cfg.get("gateway", {})
+    if str(gw.get("host", "127.0.0.1")) not in ("127.0.0.1", "localhost", "::1"):
+        print(f"  {YELLOW}!{RESET} 网关监听 {gw.get('host')}，若在共享局域网建议设置 gateway.auth_token")
+    if gw.get("auth_token"):
+        print(f"  {GREEN}✓{RESET} 访问鉴权已开启")
+    check("say 命令", bool(subprocess.run(["which", "say"], capture_output=True).stdout))
+    check("osascript", bool(subprocess.run(["which", "osascript"], capture_output=True).stdout))
+
+    print("-" * 58)
+    print("提示：打字注入还需要在「系统设置 → 隐私与安全性 → 辅助功能」里勾选你的终端。")
+    print("全部通过" if ok else "有项目未通过，请按上面的提示处理。")
+    return 0 if ok else 1
+
+
+# --------------------------------------------------------------------------- #
+# 入口
+# --------------------------------------------------------------------------- #
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="jarvis",
+        description="Jarvis Gateway 启动器（ESP32 语音输入与 Mac 控制）",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    p_start = sub.add_parser("start", help="启动全部服务")
+    p_start.add_argument("--open", action="store_true", help="启动后打开浏览器控制台")
+    p_start.add_argument("--no-wait", action="store_true", help="不等待识别模型预热")
+
+    p_restart = sub.add_parser("restart", help="重启全部服务")
+    p_restart.add_argument("--open", action="store_true", help="重启后打开控制台")
+
+    sub.add_parser("stop", help="停止全部服务")
+    sub.add_parser("status", help="查看服务状态")
+    sub.add_parser("open", help="打开浏览器控制台")
+    sub.add_parser("doctor", help="环境自检")
+
+    p_logs = sub.add_parser("logs", help="查看日志")
+    p_logs.add_argument("which", nargs="?", default="gateway",
+                        choices=["gateway", "whisper", "data"])
+    p_logs.add_argument("-f", "--follow", action="store_true", help="持续跟踪")
+
+    p_auto = sub.add_parser("autostart", help="开机自启")
+    p_auto.add_argument("action", nargs="?", default="status",
+                        choices=["on", "off", "status"])
+
+    args = parser.parse_args()
+    cfg = load_config()
+
+    if args.command in (None, "start"):
+        return cmd_start(cfg,
+                         open_panel=getattr(args, "open", False),
+                         wait=not getattr(args, "no_wait", False))
+    if args.command == "stop":
+        return cmd_stop(cfg)
+    if args.command == "restart":
+        cmd_stop(cfg)
+        time.sleep(0.8)
+        return cmd_start(cfg, open_panel=args.open, wait=True)
+    if args.command == "status":
+        return cmd_status(cfg)
+    if args.command == "open":
+        open_dashboard(cfg)
+        return 0
+    if args.command == "logs":
+        return cmd_logs(cfg, args.which, args.follow)
+    if args.command == "autostart":
+        return cmd_autostart(cfg, args.action)
+    if args.command == "doctor":
+        return cmd_doctor(cfg)
+
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,49 @@
+{
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18888,
+    "auth_token": "",
+    "allowed_hosts": [],
+    "enable_legacy_data_port": false
+  },
+  "whisper": {
+    "cli_bin": "/opt/homebrew/bin/whisper-cli",
+    "server_bin": "/opt/homebrew/bin/whisper-server",
+    "model": "~/.cache/whisper/ggml-small-q5_1.bin",
+    "port": 18889,
+    "language": "zh",
+    "prompt": "以下是普通话简体中文语音输入。",
+    "beam_size": 2
+  },
+  "tts": {
+    "voice": "Tingting",
+    "gain": 1.3
+  },
+  "typing": {
+    "polish_threshold_sec": 2.8,
+    "speak_typed": false,
+    "default_mode": "auto"
+  },
+  "llm": {
+    "primary": {
+      "name": "主模型",
+      "api_key": "YOUR_API_KEY_HERE",
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini",
+      "timeout": 8.0
+    },
+    "fallback": {
+      "name": "备用模型",
+      "api_key": "",
+      "base_url": "",
+      "model": "",
+      "timeout": 8.0
+    }
+  },
+  "data_service": {
+    "port": 8080,
+    "opentoken_bin": "opentoken",
+    "weather_city": "Beijing",
+    "weather_label": "北京"
+  }
+}
