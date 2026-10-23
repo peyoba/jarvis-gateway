@@ -4,6 +4,7 @@ import copy
 import http.client
 import io
 import json
+import socket
 import struct
 import threading
 import time
@@ -19,6 +20,18 @@ from jarvis_gateway.server.server import UnifiedGatewayServer
 TOKEN = "secret123"
 
 
+def wait_for_port(port, timeout=10.0):
+    """Wait until the in-process server is accepting connections."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return
+        except OSError:
+            time.sleep(0.05)
+    pytest.fail(f"gateway did not start listening on 127.0.0.1:{port} within {timeout}s")
+
+
 @pytest.fixture(scope="module")
 def gateway():
     cfg = copy.deepcopy(DEFAULT_CONFIG)
@@ -29,9 +42,19 @@ def gateway():
         "enable_legacy_data_port": False,
     })
     server = UnifiedGatewayServer(cfg)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    startup_errors = []
+
+    def run():
+        try:
+            server.serve_forever()
+        except Exception as exc:  # pragma: no cover - only surfaced on failure
+            startup_errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
     thread.start()
-    time.sleep(0.4)
+    wait_for_port(19996)
+    if startup_errors:
+        pytest.fail(f"gateway failed to start: {startup_errors[0]!r}")
     yield server
     server.stop_services()
 

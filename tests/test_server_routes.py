@@ -2,6 +2,7 @@
 
 import copy
 import json
+import socket
 import threading
 import time
 import urllib.parse
@@ -9,6 +10,18 @@ import urllib.request
 
 from jarvis_gateway.config import DEFAULT_CONFIG
 from jarvis_gateway.server.server import UnifiedGatewayServer
+
+
+def wait_for_port(port, timeout=10.0):
+    """Wait until the in-process server is accepting connections."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise AssertionError(f"gateway did not start listening on 127.0.0.1:{port} within {timeout}s")
 
 
 def test_server_routes():
@@ -25,7 +38,7 @@ def test_server_routes():
     thread.start()
 
     # Wait for server to bind
-    time.sleep(0.5)
+    wait_for_port(19998)
     base_url = "http://127.0.0.1:19998"
 
     try:
