@@ -10,6 +10,7 @@ import socket
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from typing import Any, Dict, Optional
 
 from jarvis_gateway import __version__
@@ -22,6 +23,23 @@ from jarvis_gateway.services.token_service import TokenService
 from jarvis_gateway.services.weather_service import WeatherService
 from jarvis_gateway.state import GatewayState
 from jarvis_gateway.tts.mac_say import MacSayTTS
+
+
+class GatewayHTTPServer(ThreadingHTTPServer):
+    """HTTP server that never blocks startup on a reverse-DNS lookup.
+
+    ``HTTPServer.server_bind`` calls ``socket.getfqdn()``, which can stall for
+    tens of seconds on machines with slow or unreachable DNS. The server name
+    is only informational here, so bind directly with the configured host.
+    """
+
+    daemon_threads = True
+
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
 
 class UnifiedGatewayServer:
@@ -141,13 +159,13 @@ class UnifiedGatewayServer:
         handler_cls = self.create_handler_class()
 
         # Bind the main port first: a failure here must not leave background workers running.
-        self.main_httpd = ThreadingHTTPServer((self.host, self.port), handler_cls)
+        self.main_httpd = GatewayHTTPServer((self.host, self.port), handler_cls)
         self.start_services()
 
         # Start legacy port listener if enabled and distinct
         if self.enable_legacy_data_port and self.data_port and self.data_port != self.port:
             try:
-                self.legacy_httpd = ThreadingHTTPServer((self.host, self.data_port), handler_cls)
+                self.legacy_httpd = GatewayHTTPServer((self.host, self.data_port), handler_cls)
                 self._legacy_thread = threading.Thread(
                     target=self.legacy_httpd.serve_forever,
                     daemon=True,
