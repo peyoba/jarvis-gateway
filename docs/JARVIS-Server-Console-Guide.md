@@ -396,7 +396,7 @@ sequenceDiagram
     Note over User,Board: 场景二：用户在 ESP32 物理按键切换模式
     User->>Board: 触摸板端模式切换按键
     Board->>Board: 自身模式切换为 raw，屏幕刷新为「原字」
-    Board->>Gateway: GET /mode?set=raw&simple=1
+    Board->>Gateway: POST /mode?set=raw
     Gateway->>Gateway: 更新内存 CURRENT_INPUT_MODE = raw
     Note over Dashboard,Gateway: 网页控制台每 3 秒刷新
     Dashboard->>Gateway: GET /status
@@ -413,18 +413,18 @@ sequenceDiagram
 
 #### 网关主服务端口：`18888`
 - `GET /` 或 `GET /dashboard`：返回控制台 HTML 界面。
-- `GET /status`：返回控制台专用的全量 JSON 状态快照（每次请求实时汇总，Web 端每 3 秒轮询）。快照含最近听写文本，因此配置 `gateway.auth_token` 后该接口也需鉴权；`/ping` 与 `/mode?simple=1` 保持开放。
+- `GET /status`：返回控制台专用的全量 JSON 状态快照（每次请求实时汇总，Web 端每 3 秒轮询）。快照含最近听写文本，因此配置 `gateway.auth_token` 后该接口也需鉴权；`GET /status?summary=1` 只返回网关/Whisper/数据摘要与统计，不含最近文本，供 CLI/App 健康检查；`/ping` 与 `/mode?simple=1` 保持开放。
 - `GET /ping`：轻量心跳监测，返回服务就绪态与版本；本机回环请求还会带上工程根目录 `root`，供启动器识别重复实例（不会向局域网暴露路径）。
 - `GET /mode`：查询当前模式；`?simple=1` 时仅返回 `{"current_mode": "..."}`（板端轮询用）。
-- `POST /mode?set=<auto|raw|polish|dialog>`：设置模式，也接受 JSON `{"mode": "..."}`。旧 `GET /mode?set=...` 仍兼容。
+- `POST /mode?set=<auto|raw|polish|dialog>`：设置模式，也接受 JSON `{"mode": "..."}`。状态查询使用 `GET /mode?simple=1`；GET 写操作已禁用并返回 405。
 - `POST /toggle-mode`：依次轮换模式（`auto -> raw -> polish -> dialog -> auto`）。
-- `POST /chat` 或 `POST /type`：ESP32 录音上报通道，16 kHz / 16-bit / 单声道 PCM 或 WAV，上限 8 MiB。
+- `POST /chat` 或 `POST /type`：ESP32 录音上报通道，16 kHz / 16-bit / 单声道 PCM 或 WAV；请求体上限 8 MiB，解码后最长 120 秒。
 - `GET /token-stats`：OpenToken 今日汇总、各工具明细。
 - `GET /weather`：当前气温、天气描述、湿度与城市中文标签。
 - 旧版独立 `:8080` 仅在 `gateway.enable_legacy_data_port` 为 `true` 时监听，并复用上述数据路径。
 
 #### 鉴权（可选，共享局域网建议开启）
-`gateway.auth_token` 非空时，所有写操作必须带 `Authorization: Bearer <token>` 或 `X-Jarvis-Token: <token>`。环境变量 `JARVIS_AUTH_TOKEN` 优先。ESP32 固件当前不会自动携带 token，启用前请先更新固件。
+`gateway.auth_token` 非空时，所有写操作必须带 `Authorization: Bearer <token>` 或 `X-Jarvis-Token: <token>`，并且浏览器写请求的 `Origin` 必须与当前 Host 同源；无 Origin 的 ESP32/CLI 请求仍可用令牌访问。环境变量 `JARVIS_AUTH_TOKEN` 优先，缺失的 `${VAR}` 会阻止启动。ESP32 固件当前不会自动携带 token，启用前请先更新固件。
 
 ---
 
@@ -440,7 +440,8 @@ sequenceDiagram
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                                               |
 +                      UTF-8 编码 JSON 元数据                   +
-|             {"heard":"...", "reply":"...", "mode":"..."}      |
+|       {"heard":"...", "reply":"...", "typed":"...",              |
+|        "mode":"...", "kind":"ok|miss|error", "error":"..."}      |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                                               |
 +                   16kHz 16-bit Mono PCM 音频流                +

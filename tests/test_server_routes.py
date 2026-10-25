@@ -83,7 +83,7 @@ def test_server_routes():
 
         # 3. Auth protected endpoint without token -> 401
         try:
-            req = urllib.request.Request(f"{base_url}/mode?set=raw")
+            req = urllib.request.Request(f"{base_url}/mode?set=raw", method="POST", data=b"")
             urllib.request.urlopen(req)
             assert False, "Should have raised 401"
         except urllib.error.HTTPError as e:
@@ -92,6 +92,7 @@ def test_server_routes():
         # 4. Auth protected endpoint with Bearer token -> 200
         req = urllib.request.Request(
             f"{base_url}/mode?set=raw",
+            method="POST", data=b"",
             headers={"Authorization": "Bearer secret123"},
         )
         with urllib.request.urlopen(req) as resp:
@@ -120,3 +121,5 @@ def test_server_routes():
 
     finally:
         server.stop_services()
+        thread.join(timeout=3)
+        assert not thread.is_alive()

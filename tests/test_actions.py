@@ -1,5 +1,7 @@
 """Unit tests for system action matching and safety guards."""
 
+import pytest
+
 from jarvis_gateway.actions.system import SAFE_APP_PATTERN, SystemActionExecutor, strip_wake_word
 
 
@@ -57,3 +59,20 @@ def test_wake_word_is_not_part_of_the_command():
     # A sentence merely containing the name must not be treated as a command.
     utterance, woke = strip_wake_word("贾维斯这个项目真不错")
     assert (utterance, woke) == ("贾维斯这个项目真不错", False)
+
+
+@pytest.mark.parametrize(("action", "kind", "command"), [
+    ("volume_up", "volume_up", [
+        "osascript", "-e", "set volume output volume ((output volume of (get volume settings)) + 12)",
+    ]),
+    ("set_volume:150", "set_volume", ["osascript", "-e", "set volume output volume 100"]),
+    ("open_app:Synthetic Private App", "open_app", ["open", "-a", "Synthetic Private App"]),
+])
+def test_action_execution_preserves_commands_without_logging_arguments(
+    monkeypatch, capsys, action, kind, command
+):
+    calls = []
+    monkeypatch.setattr(SystemActionExecutor, "_run_safe", lambda args: calls.append(args))
+    SystemActionExecutor.execute_action(action)
+    assert calls == [command]
+    assert capsys.readouterr().out.strip() == f"[*] 执行 Mac 动作: {kind}"

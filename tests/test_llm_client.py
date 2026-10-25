@@ -56,3 +56,47 @@ def test_polish_falls_back_to_secondary_channel():
     manager = _manager(primary_reply=None, fallback_reply="这是润色后的文本。")
 
     assert manager.polish_text("这是润色后的文本") == "这是润色后的文本。"
+
+
+def test_sdk_retries_are_disabled(monkeypatch):
+    from unittest.mock import Mock
+
+    factory = Mock()
+    monkeypatch.setattr("jarvis_gateway.llm.client.OpenAI", factory)
+    LLMClientManager({
+        "primary": {"api_key": "test-only", "base_url": "https://primary.invalid"},
+        "fallback": {"api_key": "test-only", "base_url": "https://fallback.invalid"},
+    })
+    assert factory.call_count == 2
+    assert all(call.kwargs["max_retries"] == 0 for call in factory.call_args_list)
+
+
+def test_fallback_uses_remaining_deadline(monkeypatch):
+    manager = _manager(fallback_reply="备用回复")
+    manager.config["total_timeout"] = 3.0
+    clock = [100.0]
+    monkeypatch.setattr("jarvis_gateway.llm.client.time.monotonic", lambda: clock[0])
+
+    def slow_primary(**kwargs):
+        clock[0] += 2.5
+        raise TimeoutError
+
+    manager.primary_client.chat.completions.create = slow_primary
+    assert manager.chat("测试")[0] == "备用回复"
+    assert manager.fallback_client.chat.completions.calls[0]["timeout"] == 0.5
+
+
+def test_exhausted_deadline_skips_fallback(monkeypatch):
+    manager = _manager(fallback_reply="不应调用")
+    manager.config["total_timeout"] = 1.0
+    clock = [100.0]
+    monkeypatch.setattr("jarvis_gateway.llm.client.time.monotonic", lambda: clock[0])
+
+    def slow_primary(**kwargs):
+        clock[0] += 2
+        raise TimeoutError
+
+    manager.primary_client.chat.completions.create = slow_primary
+    manager.chat("测试")
+    assert manager.last_chat_failed is True
+    assert manager.fallback_client.chat.completions.calls == []

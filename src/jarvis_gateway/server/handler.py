@@ -10,6 +10,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import struct
 import time
 from http.server import BaseHTTPRequestHandler
@@ -20,7 +21,12 @@ from jarvis_gateway import __version__
 from jarvis_gateway.actions.injector import CursorInjector
 from jarvis_gateway.actions.system import SystemActionExecutor, strip_wake_word
 from jarvis_gateway.asr.manager import is_hallucination
-from jarvis_gateway.audio.converter import temporary_wav_file, wav_bytes_to_pcm16
+from jarvis_gateway.audio.converter import (
+    MAX_PCM_BYTES,
+    AudioLimitError,
+    temporary_wav_file,
+    wav_bytes_to_pcm16,
+)
 
 if TYPE_CHECKING:
     from jarvis_gateway.server.server import UnifiedGatewayServer
@@ -32,7 +38,7 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
     # Reference to the container server
     gateway_server: UnifiedGatewayServer
 
-    # Reject oversized uploads early (8 MB ≈ 4 minutes of 16 kHz/16-bit mono PCM).
+    # WAV 容器最多 8 MiB；解码后的 PCM 另行限制为 120 秒。
     max_body_bytes = 8 * 1024 * 1024
     timeout = 30
 
@@ -97,7 +103,7 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         elif custom_header:
             provided = custom_header.strip()
 
-        if provided and hmac.compare_digest(provided, token):
+        if provided and hmac.compare_digest(provided.encode("utf-8"), token.encode("utf-8")):
             return True
 
         self._reject(401, "Unauthorized: invalid or missing auth token")
@@ -108,12 +114,32 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         if not self._host_allowed():
             self._reject(403, "Forbidden: unexpected Host header")
             return False
-        if self._cross_site():
-            self._reject(403, "Forbidden: cross-site request")
+        if self._cross_site() or not self._origin_allowed():
+            self._reject(403, "Forbidden: request must be same-origin")
             return False
         return self._check_auth()
 
-    def _send_json(self, data: dict, status: int = 200):
+    def _origin_allowed(self) -> bool:
+        # ESP32/CLI 没有 Origin；浏览器有 Origin 时严格比较协议、主机和端口。
+        origins = self.headers.get_all("Origin", [])
+        if not origins:
+            return True
+        if len(origins) != 1 or len(self.headers.get_all("Host", [])) != 1:
+            return False
+        try:
+            origin = urlparse(origins[0])
+            host = urlparse("http://" + self.headers.get("Host", ""))
+            return bool(
+                origin.scheme == "http" and origin.hostname
+                and origin.hostname == host.hostname
+                and (origin.port or 80) == (host.port or 80)
+                and not origin.username and not origin.password
+                and not origin.path and not origin.query and not origin.fragment
+            )
+        except ValueError:
+            return False
+
+    def _send_json(self, data: dict, status: int = 200, extra_headers: dict | None = None):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -122,6 +148,8 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         # readable by arbitrary websites the user happens to visit.
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -160,7 +188,8 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         # 2. System status (contains recent dictation text, so protect it when
         # auth is configured; /ping and /mode?simple=1 stay open for the board).
         if path == "/status":
-            if not self._check_auth():
+            summary = qs.get("summary") == ["1"]
+            if not summary and not self._check_auth():
                 return
             st = state.build_status(
                 port=server.port,
@@ -171,6 +200,9 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
                 token_snapshot=server.token_service.get_snapshot(),
                 weather_snapshot=server.weather_service.get_snapshot(),
             )
+            if summary:
+                st = {k: st[k] for k in ("gateway", "whisper", "data", "stats")}
+                st["gateway"] = {k: v for k, v in st["gateway"].items() if k != "root"}
             self._send_json(st)
             return
 
@@ -193,12 +225,12 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         # 4. Mode management
         if path == "/mode":
             if "set" in qs:
-                if not self._mutation_allowed():
-                    return
-                new_mode = qs["set"][0]
-                if not state.set_mode(new_mode):
-                    self._send_json({"error": "invalid mode", "options": ["auto", "raw", "polish", "dialog"]}, status=400)
-                    return
+                self._send_json(
+                    {"error": "method not allowed; use POST /mode"},
+                    status=405,
+                    extra_headers={"Allow": "GET, POST"},
+                )
+                return
 
             if "simple" in qs:
                 self._send_json({"current_mode": state.mode})
@@ -216,10 +248,11 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/toggle-mode":
-            if not self._mutation_allowed():
-                return
-            new_mode = state.toggle_mode()
-            self._send_json({"current_mode": new_mode, "mode": new_mode})
+            self._send_json(
+                {"error": "method not allowed; use POST /toggle-mode"},
+                status=405,
+                extra_headers={"Allow": "POST"},
+            )
             return
 
         # 5. Token & Weather data endpoints (merged from 8080 service)
@@ -261,9 +294,8 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception:
-            import traceback
-
-            traceback.print_exc()
+            # 不把可能包含正文/凭据的异常对象或 traceback 写入持久日志。
+            print("[!] 请求处理失败 (internal_error)", flush=True)
             state = getattr(self.gateway_server, "state", None)
             if state is not None:
                 try:
@@ -307,31 +339,37 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         qs = parse_qs(parsed.query)
-        server = self.gateway_server
-        state = server.state
-
-        if not self._host_allowed():
-            self._reject(403, "Forbidden: unexpected Host header")
+        if not self._mutation_allowed():
             return
-        if self._cross_site():
-            self._reject(403, "Forbidden: cross-site request")
-            return
-
         if path == "/mode":
             self._handle_mode_post(qs)
             return
-
+        if path == "/toggle-mode":
+            mode = self.gateway_server.state.toggle_mode()
+            self._send_json({"current_mode": mode, "mode": mode})
+            return
         if path not in ("/chat", "/type"):
             self._send_json({"error": "endpoint not found"}, status=404)
             return
 
-        # Optional auth verification
-        if not self._check_auth():
+        # 桌面光标是全局共享资源。拒绝重叠请求（不排队、不先读入音频），
+        # 避免后来的短语先上屏及并发解码/模型请求的内存放大。
+        if not self.gateway_server.turn_lock.acquire(blocking=False):
+            self._reject(429, "gateway busy; retry after the current turn completes")
             return
-
-        t_req = time.time()
         try:
-            content_length = int(self.headers.get("Content-Length", 0))
+            self._audio_post(qs)
+        finally:
+            self.gateway_server.turn_lock.release()
+
+    def _audio_post(self, qs):
+        t_req = time.monotonic()
+        if self.headers.get("Transfer-Encoding"):
+            self._reject(400, "Transfer-Encoding is not supported")
+            return
+        lengths = self.headers.get_all("Content-Length", [])
+        try:
+            content_length = int(lengths[0]) if len(lengths) == 1 else 0
         except ValueError:
             content_length = 0
         if content_length <= 0:
@@ -340,188 +378,107 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         if content_length > self.max_body_bytes:
             self._reject(413, f"audio too large (max {self.max_body_bytes} bytes)")
             return
-
         audio_data = self.rfile.read(content_length)
-        if len(audio_data) < 100:
-            self._reject(400, "audio too short")
+        if len(audio_data) != content_length or len(audio_data) < 100:
+            self._reject(400, "audio too short or incomplete")
             return
         if audio_data[:4] == b"\x1aE\xdf\xa3":
-            self._reject(415, "WebM/Opus is not supported; send raw 16 kHz 16-bit mono PCM or a RIFF/WAV file")
+            self._reject(415, "WebM/Opus is not supported; send raw 16 kHz 16-bit mono PCM or RIFF/WAV")
             return
         if audio_data[:4] == b"RIFF":
-            decoded = wav_bytes_to_pcm16(audio_data)
-            if not decoded:
+            try:
+                audio_data = wav_bytes_to_pcm16(audio_data)
+            except AudioLimitError as exc:
+                self._reject(413, str(exc))
+                return
+            if not audio_data:
                 self._reject(400, "unsupported WAV format; expected 16-bit PCM")
                 return
-            audio_data = decoded
-
+        if len(audio_data) > MAX_PCM_BYTES:
+            self._reject(413, "decoded audio exceeds 120 seconds")
+            return
+        if len(audio_data) % 2:
+            self._reject(400, "16-bit PCM requires complete samples")
+            return
         audio_sec = len(audio_data) / 32000.0
-        print(f"\n[+] 收到音频数据: {len(audio_data)} 字节 (约 {audio_sec:.2f}秒)", flush=True)
-
-        # Mode parsing
+        print(f"[+] 收到音频: {len(audio_data)} 字节 ({audio_sec:.2f}s)", flush=True)
+        server = self.gateway_server
         req_mode = qs.get("mode", [None])[0] or self.headers.get("X-Input-Mode")
-        active_mode = req_mode.lower() if req_mode else state.mode
-        if active_mode not in ("auto", "raw", "polish", "dialog"):
-            active_mode = state.mode
-
-        # Save to temporary WAV with AGC applied
+        mode = req_mode.lower() if req_mode else server.state.mode
+        if mode not in ("auto", "raw", "polish", "dialog"):
+            mode = server.state.mode
         with temporary_wav_file(audio_data, apply_gain=True) as in_wav:
-            # 1. Speech Recognition
-            heard_text, asr_elapsed, asr_tag = server.asr_manager.transcribe(in_wav)
+            heard, _, provider = server.asr_manager.transcribe(in_wav)
+        if provider == "none":
+            self._send_turn("", "语音识别服务暂时不可用，请稍后重试。", "", mode,
+                            "error", "asr_unavailable", True, t_req)
+            return
+        if is_hallucination(heard, audio_sec):
+            self._send_turn("...", "我没有听清，请按住按键再试一次。", "", mode,
+                            "miss", "not_recognized", True, t_req)
+            return
+        self._process_turn(heard, mode, audio_sec, t_req)
 
-            # Silence or hallucination detection
-            if not heard_text or is_hallucination(heard_text, audio_sec):
-                heard_text = "..."
-                reply_text = "我没有听清，请按住按键再试一次。"
-                pcm_out = server.tts.synthesize(reply_text)
-                meta_json = json.dumps(
-                    {"heard": heard_text, "reply": reply_text}, ensure_ascii=False
-                ).encode("utf-8")
-                payload = struct.pack("!I", len(meta_json)) + meta_json + pcm_out
-
-                self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-                state.record_turn(heard_text, reply_text, "", active_mode, time.time() - t_req, "miss")
-                return
-
-            # 2. Intent Routing and Dispatch
-            # Strip the wake word once; all routing below operates on the command text.
-            utterance, woke = strip_wake_word(heard_text)
-            reply_text = ""
-            final_typed_text = ""
-            should_play_speech = False
-            is_type_action = False
-
-            explicit_raw = ("原字：", "原字", "直接打：", "直接打", "打字：", "打字")
-            explicit_polish = ("帮我润色：", "润色：", "帮我润色", "润色", "整理：", "整理", "改写：", "改写")
-
-            if utterance.startswith(explicit_raw):
-                # Explicit spoken prefix always wins: the user asked for literal typing.
-                is_type_action = True
-                clean = utterance
-                for pfx in explicit_raw:
-                    if clean.startswith(pfx):
-                        clean = clean[len(pfx):].strip()
-                        break
-                final_typed_text = clean or utterance
-                if CursorInjector.inject_text(final_typed_text):
-                    reply_text = f"[已原字键入] {final_typed_text}"
-                else:
-                    reply_text = "[键入失败] 请检查 macOS 辅助功能权限"
-
-            elif utterance.startswith(explicit_polish):
-                is_type_action = True
-                clean = utterance
-                for pfx in explicit_polish:
-                    if clean.startswith(pfx):
-                        clean = clean[len(pfx):].strip()
-                        break
-                final_typed_text = server.llm_manager.polish_text(clean or utterance)
-                server.token_service.add_local_tokens(len(final_typed_text) * 2)
-                if CursorInjector.inject_text(final_typed_text):
-                    reply_text = f"[已AI润色] {final_typed_text}"
-                else:
-                    reply_text = "[键入失败] 请检查 macOS 辅助功能权限"
-
+    def _process_turn(self, heard, mode, audio_sec, t_req):
+        server = self.gateway_server
+        utterance, woke = strip_wake_word(heard)
+        # 必须有冒号，普通的“打字速度/整理资料”等口述不能变成命令。
+        explicit = re.match(r"^(原字|直接打|打字|帮我润色|润色|整理|改写)[：:]\s*(.+)$", utterance, re.S)
+        typed = ""
+        error = ""
+        speak = False
+        if explicit:
+            command, content = explicit.groups()
+            polish = command not in ("原字", "直接打", "打字")
+            is_typing = True
+        else:
+            is_typing = mode != "dialog" and not woke
+            content = utterance
+            polish = mode == "polish" or (mode == "auto" and audio_sec >= server.polish_threshold)
+        if is_typing:
+            attempted = server.llm_manager.polish_text(content) if polish else content
+            if polish:
+                server.token_service.add_local_tokens(len(attempted) * 2)
+            if CursorInjector.inject_text(attempted):
+                typed = attempted
+                reply = ("[已AI润色] " if polish else "[已原字键入] ") + typed
             else:
-                # Fast commands / conversation only make sense in dialog mode (or after the wake word).
-                # In auto/raw/polish the user is dictating, so we must never hijack the sentence.
-                dialog_intent = active_mode == "dialog" or woke
-                fast_reply = None
-                if dialog_intent and not utterance:
-                    fast_reply = "我在，请说。"
-                elif dialog_intent:
-                    fast_reply = SystemActionExecutor.match_fast_command(
-                        utterance, server.token_service, server.weather_service
-                    )
-
-                if fast_reply:
-                    reply_text = fast_reply
-                    should_play_speech = True
-                    print(f"[*] 命中极速本地控制指令: '{reply_text}'", flush=True)
-
-                elif dialog_intent:
-                    reply_text, actions = server.llm_manager.chat(utterance)
-                    server.token_service.add_local_tokens(len(reply_text) * 2)
-                    for act in actions:
-                        if act == "query_tokens":
-                            reply_text = server.token_service.get_stats_text()
-                        elif act == "query_weather":
-                            reply_text = server.weather_service.get_weather_text()
-                        else:
-                            SystemActionExecutor.execute_action(act)
-                    should_play_speech = True
-
-                elif active_mode == "raw":
-                    is_type_action = True
-                    final_typed_text = utterance
-                    if CursorInjector.inject_text(final_typed_text):
-                        reply_text = f"[已原字键入] {final_typed_text}"
+                reply = "[键入失败] 请检查 macOS 辅助功能权限"
+                error = "injection_failed"
+            speak = server.state.speak_typed
+        else:
+            reply = "我在，请说。" if not utterance else SystemActionExecutor.match_fast_command(
+                utterance, server.token_service, server.weather_service
+            )
+            if not reply:
+                reply, actions = server.llm_manager.chat(utterance)
+                server.token_service.add_local_tokens(len(reply) * 2)
+                if getattr(server.llm_manager, "last_chat_failed", False):
+                    error = "llm_unavailable"
+                for action in actions:
+                    if action == "query_tokens":
+                        reply = server.token_service.get_stats_text()
+                    elif action == "query_weather":
+                        reply = server.weather_service.get_weather_text()
                     else:
-                        reply_text = "[键入失败] 请检查 macOS 辅助功能权限"
+                        SystemActionExecutor.execute_action(action)
+            speak = True
+        self._send_turn(heard, reply, typed, mode, "error" if error else "ok", error, speak, t_req)
 
-                elif active_mode == "polish":
-                    is_type_action = True
-                    final_typed_text = server.llm_manager.polish_text(utterance)
-                    server.token_service.add_local_tokens(len(final_typed_text) * 2)
-                    if CursorInjector.inject_text(final_typed_text):
-                        reply_text = f"[已AI润色] {final_typed_text}"
-                    else:
-                        reply_text = "[键入失败] 请检查 macOS 辅助功能权限"
-
-                else:
-                    # "auto" Mode: short speech -> raw, long speech -> polished
-                    is_type_action = True
-                    if audio_sec < server.polish_threshold:
-                        print(
-                            f"[*] 自动触发【极速原字】(时长 {audio_sec:.2f}s < {server.polish_threshold:g}s)",
-                            flush=True,
-                        )
-                        final_typed_text = utterance
-                        if CursorInjector.inject_text(final_typed_text):
-                            reply_text = f"[已原字键入] {final_typed_text}"
-                        else:
-                            reply_text = "[键入失败] 请检查 macOS 辅助功能权限"
-                    else:
-                        print(
-                            f"[*] 自动触发【AI智能润色】(时长 {audio_sec:.2f}s >= {server.polish_threshold:g}s)",
-                            flush=True,
-                        )
-                        final_typed_text = server.llm_manager.polish_text(utterance)
-                        server.token_service.add_local_tokens(len(final_typed_text) * 2)
-                        if CursorInjector.inject_text(final_typed_text):
-                            reply_text = f"[已AI润色] {final_typed_text}"
-                        else:
-                            reply_text = "[键入失败] 请检查 macOS 辅助功能权限"
-
-            # 3. Output Speech Synthesis or 100ms Silence Frame
-            if should_play_speech or (is_type_action and state.speak_typed):
-                pcm_out = server.tts.synthesize(reply_text)
-            else:
-                # 100ms of silence (3200 bytes for 16kHz 16-bit mono)
-                pcm_out = bytes(3200)
-
-            # 4. Binary Wire Protocol: [4-byte big-endian JSON len] + [JSON bytes] + [PCM bytes]
-            meta_json = json.dumps({
-                "heard": heard_text,
-                "reply": reply_text,
-                "typed": final_typed_text,
-                "mode": active_mode,
-            }, ensure_ascii=False).encode("utf-8")
-
-            payload = struct.pack("!I", len(meta_json)) + meta_json + pcm_out
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("X-Heard", base64.b64encode(heard_text.encode("utf-8")).decode("ascii"))
-            self.send_header("X-Reply", base64.b64encode(reply_text.encode("utf-8")).decode("ascii"))
-            self.send_header("Content-Length", str(len(payload)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(payload)
-
-            print(f"[✓] 回包发送完成: '{reply_text}' (载荷: {len(payload)} 字节)\n", flush=True)
-            state.record_turn(heard_text, reply_text, final_typed_text, active_mode, time.time() - t_req, "ok")
+    def _send_turn(self, heard, reply, typed, mode, kind, error, speak, started):
+        server = self.gateway_server
+        pcm = server.tts.synthesize(reply) if speak else bytes(3200)
+        meta = {"heard": heard, "reply": reply, "typed": typed, "mode": mode,
+                "kind": kind, "error": error, "speak": speak}
+        encoded = json.dumps(meta, ensure_ascii=False).encode("utf-8")
+        payload = struct.pack("!I", len(encoded)) + encoded + pcm
+        server.state.record_turn(heard, reply, typed, mode, time.monotonic() - started, kind)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-Heard", base64.b64encode(heard.encode("utf-8")).decode("ascii"))
+        self.send_header("X-Reply", base64.b64encode(reply.encode("utf-8")).decode("ascii"))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+        print(f"[✓] 回包完成: kind={kind}, {len(payload)} 字节", flush=True)

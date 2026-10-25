@@ -37,6 +37,8 @@ class WeatherService:
 
     def stop(self):
         self._stop_event.set()
+        if self._thread and self._thread.ident != threading.get_ident():
+            self._thread.join(timeout=6)
 
     def fetch_weather(self):
         try:

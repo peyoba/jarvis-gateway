@@ -57,7 +57,7 @@ class MacSayTTS(BaseTTS):
             print(f"[*] TTS 耗时: {time.time()-t0:.2f}s, 生成 PCM: {len(pcm_data)} 字节", flush=True)
             return pcm_data
         except Exception as e:
-            print(f"[!] TTS 生成异常: {e}", flush=True)
+            print(f"[!] TTS 生成异常: {type(e).__name__}", flush=True)
             return b""
         finally:
             if os.path.exists(out_wav):

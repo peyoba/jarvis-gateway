@@ -25,13 +25,6 @@ _HALLUCINATION_PHRASES = {
     "thankyouforwatching",
     "pleasesubscribe",
 }
-_HALLUCINATION_PATTERNS = (
-    re.compile(r"^字幕(?:由|提供|[:：])"),
-    re.compile(r"^(?:请)?不吝?点赞.*(?:订阅|转发|打赏)"),
-    re.compile(r"^(?:谢谢|感谢)(?:大家|收看|观看|收听)"),
-    re.compile(r"^(?:amaraorg|明镜与点点)"),
-)
-
 
 def _normalize(text: str) -> str:
     return re.sub(r"[\s，。！？、,.!?~～…\-]+", "", text).lower()
@@ -42,14 +35,12 @@ def is_hallucination(text: str | None, audio_sec: float | None = None) -> bool:
     if not text:
         return True
     t = _normalize(text)
-    if len(t) <= 1:
+    if not t:
         return True
     # Long recordings are real speech even if they end with a stock phrase.
     if audio_sec is not None and audio_sec > 5.0:
         return False
     if t in _HALLUCINATION_PHRASES:
-        return True
-    if any(p.search(t) for p in _HALLUCINATION_PATTERNS):
         return True
     # Degenerate repetition, e.g. "啊啊啊啊啊啊" or "。。。"
     return len(t) >= 6 and len(set(t)) <= 2
@@ -75,7 +66,7 @@ class ASRManager:
         text = self.server_asr.transcribe(wav_path)
         if text is not None:
             elapsed = time.time() - t0
-            print(f"[*] ASR (server) 耗时: {elapsed:.2f}s, 听到: '{text}'", flush=True)
+            print(f"[*] ASR (server) 耗时: {elapsed:.2f}s, 字数: {len(text)}", flush=True)
             return text, elapsed, "whisper-server"
 
         # 2. Try CLI fallback
@@ -84,7 +75,7 @@ class ASRManager:
             text = self.cli_fallback_asr.transcribe(wav_path)
             if text is not None:
                 elapsed = time.time() - t0
-                print(f"[*] ASR (cli) 耗时: {elapsed:.2f}s, 听到: '{text}'", flush=True)
+                print(f"[*] ASR (cli) 耗时: {elapsed:.2f}s, 字数: {len(text)}", flush=True)
                 return text, elapsed, "whisper-cli"
 
         elapsed = time.time() - t0

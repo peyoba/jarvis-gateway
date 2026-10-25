@@ -40,6 +40,53 @@ final class Box {
     var text = ""
 }
 
+/// 菜单轮询与 --selftest 共用配置解析，避免自检通过而真实菜单访问旧端口。
+struct GatewayConnection {
+    let port: Int
+    let token: String
+
+    init(configURL: URL, environment: [String: String] = ProcessInfo.processInfo.environment) {
+        let data = (try? Data(contentsOf: configURL)) ?? Data()
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let gateway = object?["gateway"] as? [String: Any]
+        port = (gateway?["port"] as? Int) ?? 18888
+        let raw = gateway?["auth_token"] as? String ?? ""
+        if let override = environment["JARVIS_AUTH_TOKEN"], !override.isEmpty {
+            token = override
+            return
+        }
+        let pattern = #"\$\{([A-Za-z_][A-Za-z0-9_]*)\}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            token = ""
+            return
+        }
+        var result = raw
+        for match in regex.matches(in: raw, range: NSRange(raw.startIndex..., in: raw)).reversed() {
+            guard let range = Range(match.range(at: 1), in: raw),
+                  let value = environment[String(raw[range])], !value.isEmpty,
+                  let whole = Range(match.range(at: 0), in: raw) else {
+                token = ""
+                return
+            }
+            result.replaceSubrange(whole, with: value)
+        }
+        token = result
+    }
+
+    func url(_ path: String) -> URL? {
+        URL(string: "http://127.0.0.1:\(port)\(path)")
+    }
+
+    func request(_ path: String) -> URLRequest? {
+        guard let url = url(path) else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.5
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        if !token.isEmpty { request.setValue(token, forHTTPHeaderField: "X-Jarvis-Token") }
+        return request
+    }
+}
+
 // MARK: - 菜单栏 App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -60,6 +107,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var pollTimer: Timer?
 
     let defaults = UserDefaults.standard
+
+    var connection: GatewayConnection {
+        GatewayConnection(configURL: root.appendingPathComponent("config.json"))
+    }
+
+    func gatewayURL(path: String) -> URL? {
+        connection.url(path)
+    }
+
+    func request(_ path: String) -> URLRequest? {
+        connection.request(path)
+    }
 
     // MARK: 生命周期
 
@@ -187,10 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: 状态轮询
 
     func refresh() {
-        guard let url = URL(string: "http://127.0.0.1:18888/status") else { return }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 1.5
-        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let request = request("/status?summary=1") else { return }
 
         URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             var payload: [String: Any]? = nil
@@ -242,7 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openDashboard() {
-        if let url = URL(string: "http://127.0.0.1:18888/") {
+        if let url = gatewayURL(path: "/") {
             NSWorkspace.shared.open(url)
         }
     }
@@ -365,17 +421,30 @@ if CommandLine.arguments.contains("--selftest") {
 
     let box = Box()
     let semaphore = DispatchSemaphore(value: 0)
-    var request = URLRequest(url: URL(string: "http://127.0.0.1:18888/ping")!)
-    request.timeoutInterval = 2
-    URLSession.shared.dataTask(with: request) { data, _, _ in
-        if let data = data, let text = String(data: data, encoding: .utf8) {
-            box.text = text
+    var configURL = root.appendingPathComponent("config.json")
+    if let index = CommandLine.arguments.firstIndex(of: "--config"),
+       index + 1 < CommandLine.arguments.count {
+        configURL = URL(fileURLWithPath: CommandLine.arguments[index + 1])
+    }
+    let connection = GatewayConnection(configURL: configURL)
+    print("gateway_port=\(connection.port)")
+    guard let request = connection.request("/status?summary=1") else {
+        print("status=invalid_url")
+        exit(1)
+    }
+    URLSession.shared.dataTask(with: request) { data, response, _ in
+        if (response as? HTTPURLResponse)?.statusCode == 200,
+           let data = data,
+           let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let gateway = object["gateway"] as? [String: Any],
+           (gateway["online"] as? Bool) == true {
+            box.text = "ready"
         }
         semaphore.signal()
     }.resume()
     _ = semaphore.wait(timeout: .now() + 3)
-    print("ping=\(box.text.isEmpty ? "no_response" : box.text)")
-    exit(0)
+    print("status=\(box.text.isEmpty ? "no_response" : box.text)")
+    exit(box.text == "ready" ? 0 : 1)
 }
 
 // MARK: - 启动

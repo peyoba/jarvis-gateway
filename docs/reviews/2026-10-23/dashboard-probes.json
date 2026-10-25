@@ -1,0 +1,34 @@
+[
+  {
+    "probe": "release_before_permission_granted",
+    "passed": true
+  },
+  {
+    "probe": "repeated_keydown_during_permission",
+    "passed": true
+  },
+  {
+    "probe": "stale_audio_context_cannot_close_new_recording",
+    "passed": true
+  },
+  {
+    "probe": "stale_permission_failure_and_touch_cancel",
+    "passed": true
+  },
+  {
+    "probe": "upload_blocks_additional_recording",
+    "passed": true
+  },
+  {
+    "probe": "binary_failure_metadata_is_shown",
+    "passed": true
+  },
+  {
+    "probe": "wake_word_audio_plays_outside_dialog_mode",
+    "passed": true
+  },
+  {
+    "probe": "sample_count_caps_recording_without_timer",
+    "passed": true
+  }
+]

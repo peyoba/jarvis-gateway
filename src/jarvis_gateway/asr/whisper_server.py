@@ -35,7 +35,7 @@ class WhisperServerASR(BaseASR):
             with open(wav_path, "rb") as f:
                 audio_bytes = f.read()
         except Exception as e:
-            print(f"[ASR Server] 读取音频失败 ({wav_path}): {e}", flush=True)
+            print(f"[ASR Server] 读取音频失败 ({wav_path}): {type(e).__name__}", flush=True)
             return None
 
         fields = [
@@ -72,5 +72,5 @@ class WhisperServerASR(BaseASR):
                 data = json.loads(resp.read().decode("utf-8"))
             return (data.get("text") or "").strip()
         except Exception as e:
-            print(f"[ASR Server] 请求失败 ({self.endpoint}): {e}", flush=True)
+            print(f"[ASR Server] 请求失败 ({self.endpoint}): {type(e).__name__}", flush=True)
             return None

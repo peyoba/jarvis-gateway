@@ -5,6 +5,7 @@ Probes OpenToken if available; gracefully falls back to local session token esti
 
 from __future__ import annotations
 
+import copy
 import os
 import shutil
 import subprocess
@@ -43,20 +44,12 @@ class TokenService:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # In-memory metrics state
-        self._data: Dict[str, Any] = {
-            "total": 0,
-            "total_str": "--",
-            "pct": 0,
-            "line1": "Jarvis",
-            "line2": "正在连接...",
-            "labels": ["总计  --", "Jarvis  --", "Claude  --", "Codex  --"],
-            "tools": {},
-            "active_tool": "Jarvis",
-            "last_update": 0,
-            "is_busy": False,
-            "source": "OpenToken" if self.opentoken_bin else "LocalEstimator",
-        }
+        self._day = date.today()
+        self._local_tools: Dict[str, int] = {}
+        self._local_update = 0.0
+        self._external: Optional[Dict[str, int]] = None
+        self._external_update = 0.0
+        self._external_ok = False
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -67,22 +60,25 @@ class TokenService:
 
     def stop(self):
         self._stop_event.set()
+        if self._thread and self._thread.ident != threading.get_ident():
+            self._thread.join(timeout=11)
+
+    def _reset_day(self):
+        today = date.today()
+        if today != self._day:
+            self._day = today
+            self._local_tools = {}
+            self._local_update = 0.0
+            self._external = None
+            self._external_ok = False
+            self._external_update = 0.0
 
     def add_local_tokens(self, count: int, tool_name: str = "Jarvis"):
-        """Record tokens from local Gateway LLM interactions."""
+        """始终保留本地估算；外部恢复后仅展示外部值，不相加。"""
         with self._lock:
-            # If not using external OpenToken or OpenToken gave 0
-            if not self.opentoken_bin:
-                new_total = self._data["total"] + count
-                pct = min(100, int((new_total / REFERENCE_DAILY_TOKENS) * 100))
-                self._data["total"] = new_total
-                self._data["total_str"] = format_tokens(new_total)
-                self._data["pct"] = pct
-                self._data["line1"] = f"{tool_name}: {format_tokens(new_total)}"
-                self._data["line2"] = "全部空闲"
-                self._data["labels"] = [f"总计  {format_tokens(new_total)}", f"{tool_name}  {format_tokens(new_total)}", "空闲", "空闲"]
-                self._data["last_update"] = time.time()
-                self._data["is_busy"] = True
+            self._reset_day()
+            self._local_tools[tool_name] = self._local_tools.get(tool_name, 0) + max(0, int(count))
+            self._local_update = time.time()
 
     def _fetch_opentoken_stats(self) -> Optional[Dict[str, int]]:
         if not self.opentoken_bin:
@@ -91,6 +87,8 @@ class TokenService:
         cmd = [self.opentoken_bin, "preview"]
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if p.returncode != 0:
+                return None
             lines = p.stdout.splitlines()
             header_idx = -1
             for i, line in enumerate(lines):
@@ -106,77 +104,70 @@ class TokenService:
                     break
                 if line.startswith(today_str):
                     parts = line.split()[1:]
+                    if len(parts) != len(tools) or len(set(tools)) != len(tools):
+                        return None
                     res = {}
                     for t, val_s in zip(tools, parts):
                         try:
                             res[t] = int(val_s.replace(",", ""))
                         except ValueError:
-                            res[t] = 0
-                    return res
+                            return None
+                    if "TOTAL" in res and all(v >= 0 for v in res.values()):
+                        return res
+                    return None
         except Exception:
             pass
         return None
 
-    def _worker(self):
-        tool_name_map = {
-            "antigravity": "Antigravity",
-            "claude-code": "Claude Code",
-            "hermes": "Hermes",
-            "codex": "Codex",
-            "cursor": "Cursor",
-            "gemini": "Gemini",
-            "grok": "Grok",
-        }
+    def _poll_once(self):
+        day = date.today()
+        raw_stats = self._fetch_opentoken_stats()
+        with self._lock:
+            self._reset_day()
+            self._external_ok = raw_stats is not None and day == self._day
+            if self._external_ok:
+                self._external = dict(raw_stats)
+                self._external_update = time.time()
 
+    def _worker(self):
         while not self._stop_event.is_set():
             if self.opentoken_bin:
-                raw_stats = self._fetch_opentoken_stats()
-                if raw_stats:
-                    total = raw_stats.get("TOTAL", 0)
-                    active_tools = []
-                    for k, v in raw_stats.items():
-                        if k != "TOTAL" and v > 0:
-                            name = tool_name_map.get(k, k.capitalize())
-                            active_tools.append((name, k, v))
-                    active_tools.sort(key=lambda x: x[2], reverse=True)
-
-                    labels = [f"总计  {format_tokens(total)}"]
-                    for name, _, val in active_tools[:3]:
-                        labels.append(f"{name}  {format_tokens(val)}")
-                    while len(labels) < 4:
-                        labels.append("空闲")
-
-                    line1 = f"{active_tools[0][0]}: {format_tokens(active_tools[0][2])}" if active_tools else "全部空闲"
-                    line2_parts = [
-                        f"{('Claude' if name == 'Claude Code' else name)}: {format_tokens(val)}"
-                        for name, _, val in active_tools[1:3]
-                    ]
-                    line2 = " | ".join(line2_parts) if line2_parts else "全部空闲"
-                    pct = min(100, int((total / REFERENCE_DAILY_TOKENS) * 100))
-
-                    with self._lock:
-                        self._data.update({
-                            "total": total,
-                            "total_str": format_tokens(total),
-                            "pct": pct,
-                            "line1": line1,
-                            "line2": line2,
-                            "labels": labels,
-                            "tools": raw_stats,
-                            "active_tool": active_tools[0][1] if active_tools else "AI",
-                            "last_update": time.time(),
-                            "is_busy": True,
-                        })
-
+                self._poll_once()
             self._stop_event.wait(self.poll_interval)
 
     def get_snapshot(self) -> Dict[str, Any]:
         with self._lock:
-            return dict(self._data)
+            self._reset_day()
+            external = (
+                self._external_ok and self._external is not None
+                and time.time() - self._external_update <= max(30, self.poll_interval * 3)
+            )
+            tools = dict(self._external if external else self._local_tools)
+            total = tools.get("TOTAL", 0) if external else sum(tools.values())
+            active = sorted(((k, v) for k, v in tools.items() if k != "TOTAL" and v > 0),
+                            key=lambda item: item[1], reverse=True)
+            labels = [f"总计  {format_tokens(total)}"]
+            labels.extend(f"{k}  {format_tokens(v)}" for k, v in active[:3])
+            labels.extend(["空闲"] * (4 - len(labels)))
+            return copy.deepcopy({
+                "total": total, "total_str": format_tokens(total),
+                "pct": min(100, int(total / REFERENCE_DAILY_TOKENS * 100)),
+                "line1": f"{active[0][0]}: {format_tokens(active[0][1])}" if active else "全部空闲",
+                "line2": " | ".join(f"{k}: {format_tokens(v)}" for k, v in active[1:3]) or "全部空闲",
+                "labels": labels, "tools": tools,
+                "active_tool": active[0][0] if active else "Jarvis",
+                "last_update": self._external_update if external else self._local_update,
+                "is_busy": bool(active), "source": "OpenToken" if external else "LocalEstimator",
+                "health": "ok" if external else ("degraded" if self.opentoken_bin else "local"),
+                "external_last_update": self._external_update, "estimated": not external,
+                "date": self._day.isoformat(),
+            })
 
     def get_stats_text(self) -> str:
         data = self.get_snapshot()
         total = data.get("total", 0)
+        if data.get("estimated"):
+            return f"本次网关会话估算使用 {data.get('total_str', '0')} Token，非全账户账单。"
         if not total:
             return "今天还没有消耗 Token。"
         total_str = data.get("total_str") or f"{total/10000:.1f}万"

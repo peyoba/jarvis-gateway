@@ -2,9 +2,17 @@
 
 import array
 import os
+import wave
+
+import pytest
 
 from jarvis_gateway.audio.agc import apply_adaptive_gain
-from jarvis_gateway.audio.converter import pcm_to_wav_bytes, temporary_wav_file
+from jarvis_gateway.audio.converter import (
+    AudioLimitError,
+    pcm_to_wav_bytes,
+    temporary_wav_file,
+    wav_bytes_to_pcm16,
+)
 
 
 def test_apply_adaptive_gain():
@@ -34,3 +42,18 @@ def test_temporary_wav_file():
         assert os.path.exists(wav_path)
         assert wav_path.endswith(".wav")
     assert not os.path.exists(wav_path)
+
+
+def test_wav_low_rate_amplification_is_rejected():
+    wav_bytes = pcm_to_wav_bytes(bytes(128), sample_rate=1)
+    with pytest.raises(AudioLimitError):
+        wav_bytes_to_pcm16(wav_bytes)
+
+
+def test_temporary_wav_file_treats_riff_prefixed_samples_as_pcm():
+    # 解码后的样本也可能恰好以 RIFF 开头，不能再次猜测为容器。
+    samples = pcm_to_wav_bytes(bytes(128), sample_rate=1)
+    with temporary_wav_file(samples, apply_gain=False) as wav_path:
+        with wave.open(wav_path, "rb") as wf:
+            assert wf.getparams()[:4] == (1, 2, 16000, len(samples) // 2)
+            assert wf.readframes(wf.getnframes()) == samples

@@ -23,13 +23,66 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
+    - name: Set up Node for browser regression tests
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -e ".[dev]"
 
     - name: Lint
-      run: ruff check src tests
+      run: ruff check src tests jarvis docs/reviews/2026-10-23/probe_python.py
 
     - name: Run test suite
       run: pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Build sdist and rebuild wheel from it
+      run: |
+        python -m pip install build
+        python -m build --sdist --outdir "$RUNNER_TEMP/package"
+        python - <<'PY'
+        import os
+        import tarfile
+        from pathlib import Path
+        archive = next((Path(os.environ["RUNNER_TEMP"]) / "package").glob("*.tar.gz"))
+        with tarfile.open(archive) as source:
+            names = {name.split("/", 1)[-1] for name in source.getnames()}
+        assert {
+            "jarvis", "config.example.json", "build_app.sh", "setup.cfg",
+            "build/main.swift", "build/Info.plist", "build/AppIcon.icns",
+            "tests/conftest.py", "docs/reviews/2026-10-23/probe_python.py",
+            "docs/reviews/2026-10-23/probe_dashboard.js",
+        } <= names
+        assert "config.json" not in names
+        assert not any(name.startswith(("logs/", "run/", "venv/")) for name in names)
+        PY
+        mkdir "$RUNNER_TEMP/source"
+        tar -xzf "$RUNNER_TEMP/package/"*.tar.gz -C "$RUNNER_TEMP/source" --strip-components=1
+        cd "$RUNNER_TEMP/source"
+        python -m build --wheel --outdir "$RUNNER_TEMP/package"
+    - name: Install and check actual wheel outside checkout
+      run: |
+        python -m venv "$RUNNER_TEMP/wheel-env"
+        "$RUNNER_TEMP/wheel-env/bin/pip" install "$RUNNER_TEMP/package/"*.whl
+        cd "$RUNNER_TEMP"
+        "$RUNNER_TEMP/wheel-env/bin/jarvis-gateway" --version
+        "$RUNNER_TEMP/wheel-env/bin/python" -I - <<'PY'
+        import importlib.resources
+        import jarvis_gateway
+        import jarvis_gateway.log_worker
+        from importlib.metadata import version
+        assert jarvis_gateway.__version__ == version("jarvis-gateway")
+        html = importlib.resources.files("jarvis_gateway").joinpath("web/dashboard.html").read_text()
+        assert "startRecording" in html
+        assert "micSession" in html
+        PY

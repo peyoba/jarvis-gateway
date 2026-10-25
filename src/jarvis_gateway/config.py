@@ -6,7 +6,9 @@ Loads JSON configuration with deep-merge support and environment fallback.
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -47,6 +49,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "default_mode": "auto",  # auto | raw | polish | dialog
     },
     "llm": {
+        "total_timeout": 16.0,
         "primary": {
             "name": "Primary",
             "api_key": "",
@@ -74,15 +77,118 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-def expand_env(value: Any) -> Any:
-    """Expand ${VAR} reference in strings so API keys can stay in the environment."""
+class ConfigError(ValueError):
+    """Raised when configuration would be unsafe or internally inconsistent."""
+
+
+def expand_env(value: Any, *, strict: bool = False, path: str = "") -> Any:
+    """Expand ``${VAR}`` references without ever printing their values.
+
+    ``strict`` is used for security-sensitive fields such as the gateway token.
+    Optional provider credentials may continue to use the historical empty-value
+    fallback, but an explicitly requested security variable must never silently
+    disable protection.
+    """
     if isinstance(value, str):
-        return _ENV_PATTERN.sub(lambda m: os.environ.get(m.group(1), ""), value)
+
+        def replace(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name in os.environ and (os.environ[name].strip() or not strict):
+                return os.environ[name]
+            if strict:
+                field = path or "configuration"
+                raise ConfigError(f"missing environment variable for {field}: {name}")
+            return ""
+
+        return _ENV_PATTERN.sub(replace, value)
     if isinstance(value, dict):
-        return {k: expand_env(v) for k, v in value.items()}
+        return {
+            k: expand_env(v, strict=strict, path=f"{path}.{k}" if path else str(k))
+            for k, v in value.items()
+        }
     if isinstance(value, list):
-        return [expand_env(v) for v in value]
+        return [
+            expand_env(v, strict=strict, path=f"{path}[{i}]")
+            for i, v in enumerate(value)
+        ]
     return value
+
+
+def validate_config(cfg: Dict[str, Any]) -> None:
+    """Fail closed before binding a non-loopback gateway socket."""
+    for section in DEFAULT_CONFIG:
+        if not isinstance(cfg.get(section), dict):
+            raise ConfigError(f"{section} must be an object")
+    gateway = cfg.get("gateway", {})
+    host = gateway.get("host", "127.0.0.1")
+    token = gateway.get("auth_token", "")
+    if not isinstance(host, str) or not host or host != host.strip() or any(c.isspace() for c in host):
+        raise ConfigError("gateway.host must be a nonempty string")
+    if not isinstance(token, str) or (token and not re.fullmatch(r"[\x21-\x7e]+", token)):
+        raise ConfigError("gateway.auth_token must contain only visible ASCII characters without whitespace")
+    host = host.strip().lower()
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if not loopback and not token:
+        raise ConfigError(
+            "gateway.auth_token is required when gateway.host is not loopback; "
+            "refusing to expose an unauthenticated gateway"
+        )
+
+    if _ENV_PATTERN.search(token):
+        raise ConfigError(
+            "gateway.auth_token still contains an unresolved environment placeholder"
+        )
+    for section in ("gateway", "whisper", "data_service"):
+        port = cfg[section].get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ConfigError(f"{section}.port must be an integer between 1 and 65535")
+    if cfg["gateway"]["port"] == cfg["whisper"]["port"]:
+        raise ConfigError("gateway.port and whisper.port must be different")
+    if gateway.get("enable_legacy_data_port") and cfg["data_service"]["port"] in (
+        gateway["port"], cfg["whisper"]["port"]
+    ):
+        raise ConfigError("enabled data_service.port must differ from gateway.port and whisper.port")
+    for section, key in (("gateway", "enable_legacy_data_port"), ("typing", "speak_typed")):
+        if not isinstance(cfg[section].get(key), bool):
+            raise ConfigError(f"{section}.{key} must be a boolean")
+    allowed = gateway.get("allowed_hosts", [])
+    if not isinstance(allowed, list) or not all(isinstance(h, str) for h in allowed):
+        raise ConfigError("gateway.allowed_hosts must be a list of strings")
+    if cfg["typing"].get("default_mode") not in ("auto", "raw", "polish", "dialog"):
+        raise ConfigError("typing.default_mode must be auto, raw, polish or dialog")
+    for section, keys in (
+        ("whisper", ("cli_bin", "server_bin", "model", "language", "prompt")),
+        ("tts", ("voice",)),
+        ("data_service", ("opentoken_bin", "weather_city", "weather_label")),
+    ):
+        for key in keys:
+            if not isinstance(cfg[section].get(key), str):
+                raise ConfigError(f"{section}.{key} must be a string")
+    beam = cfg["whisper"].get("beam_size")
+    if isinstance(beam, bool) or not isinstance(beam, int) or not 0 <= beam <= 128:
+        raise ConfigError("whisper.beam_size must be an integer between 0 and 128")
+
+    def number(value: Any, field: str, maximum: float, *, allow_zero: bool = False):
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or value > maximum or not math.isfinite(value)
+            or (value < 0 if allow_zero else value <= 0)
+        ):
+            raise ConfigError(f"{field} must be a finite number in the supported range")
+
+    number(cfg["typing"].get("polish_threshold_sec"), "typing.polish_threshold_sec", 120)
+    number(cfg["tts"].get("gain"), "tts.gain", 10, allow_zero=True)
+    number(cfg["llm"].get("total_timeout", 16), "llm.total_timeout", 300)
+    for channel in ("primary", "fallback"):
+        if not isinstance(cfg["llm"].get(channel), dict):
+            raise ConfigError(f"llm.{channel} must be an object")
+        for key in ("api_key", "base_url", "model", "name"):
+            if not isinstance(cfg["llm"][channel].get(key), str):
+                raise ConfigError(f"llm.{channel}.{key} must be a string")
+        number(cfg["llm"][channel].get("timeout"), f"llm.{channel}.timeout", 300)
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -111,6 +217,7 @@ def find_config_file(explicit_path: str | Path | None = None) -> Path | None:
         p = Path(env_path).expanduser().resolve()
         if p.is_file():
             return p
+        raise FileNotFoundError(f"config file not found: {p}")
 
     # Standard search paths
     search_dirs = [
@@ -137,14 +244,31 @@ def load_config(config_path: str | Path | None = None) -> Dict[str, Any]:
         try:
             with open(target, "r", encoding="utf-8") as f:
                 user_cfg = json.load(f)
-            cfg = deep_merge(cfg, expand_env(user_cfg))
-        except Exception as e:
-            print(f"[!] 读取配置文件失败 ({target}): {e}，使用默认配置", flush=True)
+            if not isinstance(user_cfg, dict):
+                raise ConfigError("configuration root must be an object")
+            # A missing token variable is a configuration error even when the
+            # host is loopback: the operator explicitly requested a secret.
+            gateway_cfg = user_cfg.get("gateway", {}) if isinstance(user_cfg, dict) else {}
+            raw_token = gateway_cfg.get("auth_token") if isinstance(gateway_cfg, dict) else None
+            expanded = expand_env(user_cfg)
+            if isinstance(raw_token, str) and _ENV_PATTERN.search(raw_token):
+                expanded["gateway"]["auth_token"] = expand_env(
+                    raw_token, strict=True, path="gateway.auth_token"
+                )
+            cfg = deep_merge(cfg, expanded)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            # JSON errors may contain private source text; never echo the parser
+            # exception or silently replace an explicitly supplied configuration.
+            raise ConfigError("cannot read configuration: invalid JSON or unreadable file") from exc
     else:
         # Check if config.example.json exists
         example = Path.cwd() / "config.example.json"
         if example.is_file() and not (Path.cwd() / "config.json").is_file():
             print("[i] 未找到 config.json，正在以默认配置启动。可参考 config.example.json 自定义。", flush=True)
+
+    if os.environ.get("JARVIS_AUTH_TOKEN"):
+        cfg["gateway"]["auth_token"] = os.environ["JARVIS_AUTH_TOKEN"]
+    validate_config(cfg)
 
     # Normalize expanded paths
     if "whisper" in cfg:

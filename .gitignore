@@ -21,6 +21,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/lib*/
+build/python/
 .pytest_cache/
 .coverage
 htmlcov/

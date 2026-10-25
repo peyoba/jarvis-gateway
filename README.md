@@ -84,9 +84,11 @@ export JARVIS_AUTH_TOKEN="$(openssl rand -hex 24)"
 ./jarvis restart
 ```
 
-`${VAR}` placeholders are expanded from the environment at startup, so secrets never need to be committed. The same token can be exported as `JARVIS_AUTH_TOKEN` to override `config.json`.
+`${VAR}` placeholders in `gateway.auth_token` are expanded from the environment at startup, so secrets never need to be committed. A referenced token variable that is missing or empty is a startup error (the gateway never silently disables authentication). The same non-empty token can be exported as `JARVIS_AUTH_TOKEN` to override `config.json`; launchd/Finder environments must define it separately. Use a random visible-ASCII token without whitespace. Non-loopback listeners without a token are rejected.
 
-Clients must then send `Authorization: Bearer <token>` (or `X-Jarvis-Token: <token>`) on write requests and `/status`. **The stock ESP32 firmware does not send this header**, so update the sketch before enabling auth. `/ping` and `/mode?simple=1` stay open for the board; `/status` requires the token because it includes recent dictation text.
+Clients must then send `Authorization: Bearer <token>` (or `X-Jarvis-Token: <token>`) on write requests and full `/status`. **The stock ESP32 firmware does not send this header**, so update the sketch before enabling auth. `/ping`, `/status?summary=1` (metadata only), and `/mode?simple=1` stay open for board/App health checks; full `/status` requires the token because it includes recent dictation text.
+
+Mode changes use `POST /mode?set=raw` or `POST /toggle-mode`. Legacy GET mutations return 405; update firmware that still uses them. Overlapping audio requests return 429 instead of typing results out of order. Browser recording stops at 60 seconds; decoded uploads are capped at 120 seconds / 8 MiB per request.
 
 > `Jarvis.app` and the launcher read the same `config.json`. After editing it, run `./jarvis restart`.
 
@@ -146,7 +148,7 @@ Any IoT device capable of making HTTP POST requests can interface with Jarvis Ga
   +--------------------------------+--------------------------------+
   | 4-byte Big-Endian JSON Length  | JSON Metadata string (UTF-8)   |
   +--------------------------------+--------------------------------+
-  | 16kHz 16-bit Mono PCM audio stream (100ms silence frame for typing)|
+  | 16kHz 16-bit Mono PCM audio stream (max 120s; 100ms silence frame for typing)|
   +----------------------------------------------------------------+
   ```
 
@@ -159,7 +161,14 @@ Any IoT device capable of making HTTP POST requests can interface with Jarvis Ga
    Go to: **System Settings → Privacy & Security → Accessibility**, and enable your terminal emulator (`Terminal` or `iTerm`) and/or `Jarvis.app`.
 
 2. **Network Security**:
-   The gateway listens on `127.0.0.1:18888` by default. If you bind `0.0.0.0` for hardware access, always set `gateway.auth_token`; without it any device on the LAN can submit audio that types into your cursor. Host headers are validated, and cross-site state-changing requests are rejected. Do not expose the port to the public internet—put it behind a VPN or an authenticated reverse proxy if you need remote access.
+   The gateway listens on `127.0.0.1:18888` by default. If you bind `0.0.0.0` for hardware access, `gateway.auth_token` is required; startup fails without it. Host headers are validated, and cross-site state-changing requests are rejected. LAN HTTP is not encrypted. Do not expose the port to the public internet—use a VPN or a correctly configured authenticated TLS proxy for remote access.
+
+3. **Privacy and logs**:
+   Audio is processed through temporary files only. Default logs contain byte counts, timings, statuses, and character counts—not dictation, model replies, or clipboard contents. New launcher-managed service logs use directory mode `0700`, files `0600`, and rotate at 5 MiB with two backups; old logs are not erased. Enable `JARVIS_HTTP_LOG` only for short, local debugging. Raw dictation stays local unless you explicitly say a command such as `润色：...`; polish/dialog modes send text to the configured LLM provider.
+
+## Python package versus checkout
+
+After installing a wheel, run `jarvis-gateway --config /path/to/config.json`. This starts the gateway only: run `whisper-server` separately or configure the CLI fallback. The menu-bar App and `./jarvis` launcher are checkout tools requiring macOS, the project files, and its Python environment. Building/installing a package does not restart an existing service.
 
 ---
 

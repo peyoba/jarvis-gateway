@@ -84,9 +84,11 @@ export JARVIS_AUTH_TOKEN="$(openssl rand -hex 24)"
 ./jarvis restart
 ```
 
-`${VAR}` 占位符在启动时从环境变量展开，密钥无需提交到仓库；`JARVIS_AUTH_TOKEN` 环境变量也会覆盖配置文件中的 `auth_token`。
+`gateway.auth_token` 的 `${VAR}` 占位符在启动时从环境变量展开，密钥无需提交到仓库；如果引用的令牌变量缺失或为空，启动会失败，不会静默关闭鉴权。非空的 `JARVIS_AUTH_TOKEN` 环境变量会覆盖配置文件中的 `auth_token`；使用 launchd/Finder 时必须单独配置它的环境。令牌应使用不含空白的随机可见 ASCII 字符；非回环监听未配置令牌会拒绝启动。
 
-开启后，客户端写请求与 `/status` 需带 `Authorization: Bearer <token>` 或 `X-Jarvis-Token: <token>`。**现有 ESP32 固件不会自动携带该请求头**，启用鉴权前请先更新固件。`/ping` 和 `/mode?simple=1` 保持开放供板子轮询；`/status` 因包含最近听写内容，配置令牌后也需要鉴权。
+开启后，客户端写请求与完整 `/status` 需带 `Authorization: Bearer <token>` 或 `X-Jarvis-Token: <token>`。**现有 ESP32 固件不会自动携带该请求头**，启用鉴权前请先更新固件。`/ping`、不含最近文本的 `/status?summary=1` 和 `/mode?simple=1` 保持开放供板子/App 做健康检查；完整 `/status` 因包含最近听写内容，配置令牌后需要鉴权。
+
+模式切换使用 POST；旧 GET 写接口返回 405，仍使用旧接口的固件需要同步修改。并行音频请求返回 429，不再乱序上屏。网页单次录音最多 60 秒，上传请求体最多 8 MiB、解码后最多 120 秒。
 
 ---
 
@@ -163,7 +165,7 @@ jarvis-gateway/
 任何能发 HTTP POST 的硬件均可接入：
 
 - **音频上报**：`POST /chat?mode=auto`（或 `/type`）
-- **请求体**：16 kHz / 16-bit / 单声道 PCM，或标准 RIFF WAV；上限 8 MiB
+- **请求体**：16 kHz / 16-bit / 单声道 PCM，或标准 RIFF WAV；请求体上限 8 MiB，解码后最长 120 秒
 - **响应**：
 
 ```text
@@ -178,7 +180,7 @@ jarvis-gateway/
 
 - `GET /status`：控制台状态（配置令牌后需鉴权）
 - `GET /ping`、`GET /mode?simple=1`：开放的心跳与模式查询
-- `POST /mode?set=auto|raw|polish|dialog`：切换模式（也接受 JSON `{"mode": "..."}`）
+- `POST /mode?set=auto|raw|polish|dialog`：切换模式（也接受 JSON `{"mode": "..."}`）；GET 仅用于查询
 - `POST /toggle-mode`：轮换模式
 - `GET /token-stats`、`GET /weather`：Token 与天气数据（默认合并到 `18888`）
 
@@ -189,7 +191,12 @@ jarvis-gateway/
 1. **macOS 辅助功能**：打字注入通过模拟 `Cmd+V` 完成。前往
    `系统设置 → 隐私与安全性 → 辅助功能`，勾选终端（`Terminal` / `iTerm`）或 `Jarvis.app`。
 2. **麦克风权限**：首次使用网页录音时，浏览器会请求麦克风权限。
-3. **网络边界**：默认只监听 `127.0.0.1`。绑定 `0.0.0.0` 时务必设置 `gateway.auth_token`；否则同网段任何设备都能提交音频并键入你的光标。不要把端口直接暴露到公网，远程访问请用 VPN 或带鉴权的反向代理。
+3. **网络边界**：默认只监听 `127.0.0.1`。绑定 `0.0.0.0` 时必须设置 `gateway.auth_token`，否则拒绝启动。局域网 HTTP 不加密；不要把端口直接暴露到公网，远程访问请用 VPN 或正确配置的带鉴权 TLS 代理。
+4. **日志与隐私**：音频只经过临时文件处理，不落持久化路径。默认日志只记录字节数、耗时、状态和字数，不记录听写正文、模型回复或剪贴板内容；新启动器管理的服务日志使用 `0700` 目录、`0600` 文件，按 5 MiB 滚动并保留两份备份，不自动清除旧日志。仅在短时本机排障时设置 `JARVIS_HTTP_LOG`。普通 raw 听写不调用云模型；显式口述「润色：……」会覆盖 raw，polish/dialog 的文本会发送给配置的模型。
+
+### Python 包与完整工程的区别
+
+安装 wheel 后使用 `jarvis-gateway --config /path/to/config.json`，只启动网关；Whisper 服务需独立启动，或使用配置好的 CLI 回退。菜单栏 App 与 `./jarvis` 启动器依赖完整工程、macOS 和 Python 环境。安装或构建不会替换正在运行的旧服务。
 
 ---
 

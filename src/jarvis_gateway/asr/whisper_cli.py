@@ -47,6 +47,8 @@ class WhisperCliASR(BaseASR):
 
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if p.returncode:
+                return None
             lines = [
                 line.strip()
                 for line in p.stdout.splitlines()
@@ -60,5 +62,5 @@ class WhisperCliASR(BaseASR):
             ]
             return "".join(lines).strip()
         except Exception as e:
-            print(f"[ASR CLI] 转写失败: {e}", flush=True)
+            print(f"[ASR CLI] 转写失败: {type(e).__name__}", flush=True)
             return None

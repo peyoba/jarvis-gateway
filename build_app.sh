@@ -6,6 +6,8 @@ cd "$(dirname "$0")"
 ROOT="$(pwd)"
 APP="$ROOT/Jarvis.app"
 BUNDLE="$APP/Contents"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)"
+MIN_MACOS="13.0"
 
 if [ ! -f "build/AppIcon.icns" ]; then
   echo "缺少 build/AppIcon.icns"
@@ -18,6 +20,8 @@ mkdir -p "$BUNDLE/MacOS" "$BUNDLE/Resources"
 
 cp "build/Info.plist" "$BUNDLE/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :JarvisProjectRoot $ROOT" "$BUNDLE/Info.plist" >/dev/null
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$BUNDLE/Info.plist" >/dev/null
+/usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $MIN_MACOS" "$BUNDLE/Info.plist" >/dev/null
 cp "build/AppIcon.icns" "$BUNDLE/Resources/AppIcon.icns"
 printf 'APPL????' > "$BUNDLE/PkgInfo"
 
@@ -28,7 +32,7 @@ xcrun swiftc \
   -O \
   -module-cache-path "$ROOT/build/.modulecache" \
   -swift-version 5 \
-  -target "${ARCH}-apple-macos13.0" \
+  -target "${ARCH}-apple-macos${MIN_MACOS}" \
   -framework Cocoa \
   "build/main.swift" \
   -o "$BUNDLE/MacOS/JarvisMenu"

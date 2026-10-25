@@ -1,0 +1,31 @@
+Name                                             Stmts   Miss  Cover   Missing
+------------------------------------------------------------------------------
+src/jarvis_gateway/__init__.py                       2      0   100%
+src/jarvis_gateway/__main__.py                      41     41     0%   5-59
+src/jarvis_gateway/actions/__init__.py               3      0   100%
+src/jarvis_gateway/actions/injector.py              88     66    25%   27-37, 41-46, 50-55, 60-69, 73-81, 85-89, 93-142
+src/jarvis_gateway/actions/system.py               121     61    50%   66-71, 76-123, 143, 146-148, 151-153, 158, 168, 173-177, 182, 184, 200-206
+src/jarvis_gateway/asr/__init__.py                   5      0   100%
+src/jarvis_gateway/asr/base.py                       6      1    83%   19
+src/jarvis_gateway/asr/manager.py                   43     19    56%   43, 46, 53, 72-92
+src/jarvis_gateway/asr/whisper_cli.py               27     14    48%   29, 32-64
+src/jarvis_gateway/asr/whisper_server.py            41     27    34%   33-76
+src/jarvis_gateway/audio/__init__.py                 3      0   100%
+src/jarvis_gateway/audio/agc.py                     20      4    80%   23, 29, 38-40
+src/jarvis_gateway/audio/converter.py               60     13    78%   42, 49-50, 52, 57, 59-62, 82-83, 96-97
+src/jarvis_gateway/config.py                        67     39    42%   79-85, 92, 106, 109-125, 133-160
+src/jarvis_gateway/llm/__init__.py                   3      0   100%
+src/jarvis_gateway/llm/client.py                    78     14    82%   33-36, 43-46, 72, 76, 93, 103-104, 114
+src/jarvis_gateway/llm/prompts.py                    2      0   100%
+src/jarvis_gateway/server/__init__.py                3      0   100%
+src/jarvis_gateway/server/handler.py               366    205    44%   42, 47, 49-50, 59, 62, 64, 90, 109-110, 129-135, 139-141, 156-158, 200-201, 204, 219-223, 239-256, 261-276, 280, 283-300, 304, 314-315, 317-318, 325-326, 330, 335-336, 346-347, 351-527
+src/jarvis_gateway/server/server.py                119     19    84%   113-114, 119-128, 149-150, 154-155, 176-177, 190-194
+src/jarvis_gateway/services/__init__.py              3      0   100%
+src/jarvis_gateway/services/token_service.py       126     34    73%   23-26, 38, 63, 73-85, 89, 101, 106, 113-114, 116-118, 147, 178-185
+src/jarvis_gateway/services/weather_service.py      55     14    75%   33, 59-61, 66-68, 75-81
+src/jarvis_gateway/state.py                         95     33    65%   45-52, 60-62, 73-87, 92, 106-121, 136
+src/jarvis_gateway/tts/__init__.py                   3      0   100%
+src/jarvis_gateway/tts/base.py                       6      1    83%   19
+src/jarvis_gateway/tts/mac_say.py                   42     29    31%   24-67
+------------------------------------------------------------------------------
+TOTAL                                             1428    634    56%

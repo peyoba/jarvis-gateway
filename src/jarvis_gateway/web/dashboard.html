@@ -164,7 +164,7 @@
   </section>
 
   <footer>
-    网关 <code id="addr">—</code> · 对话日志 <code>logs/jarvis_gateway.log</code><br>
+    网关 <code id="addr">—</code> · 运行日志 <code>logs/jarvis_gateway.log</code><br>
     默认仅监听 <code>127.0.0.1</code>。需要板子或手机访问时，把 <code>config.json</code> 的 <code>gateway.host</code> 改为 <code>0.0.0.0</code>，并设置 <code>auth_token</code>。
   </footer>
 </div>
@@ -305,9 +305,19 @@
   // resample the AudioContext stream ourselves before uploading.
   var micBtn = $("btn-mic");
   var micStatus = $("mic-status");
-  var audioCtx = null, micStream = null, sourceNode = null, processorNode = null, muteNode = null;
-  var floatChunks = [];
-  var isRecording = false;
+  var micSession = null;
+  var micState = "idle", recordingGeneration = 0, holdActive = false;
+  var maxRecordingTimer = null;
+  var MAX_RECORDING_MS = 60000;
+
+  function setMicState(next){
+    micState = next;
+    micBtn.disabled = next === "uploading";
+    micBtn.classList.toggle("recording", next === "recording");
+    micBtn.textContent = next === "recording" ? "🔴 松开完成录音..." :
+      (next === "requesting" ? "等待麦克风权限..." :
+      (next === "uploading" ? "正在处理..." : "🎙️ 按住说话 (或按住空格)"));
+  }
 
   function downsampleTo16k(input, inRate){
     var outRate = 16000;
@@ -335,41 +345,74 @@
   }
 
   async function startRecording(){
-    if (isRecording) return;
+    if (micState !== "idle") return;
+    holdActive = true;
+    var session = {
+      generation: ++recordingGeneration, stream: null, context: null,
+      source: null, processor: null, mute: null, chunks: [], samples: 0
+    };
+    micSession = session;
+    setMicState("requesting");
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({
+      session.stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      floatChunks = [];
-      sourceNode = audioCtx.createMediaStreamSource(micStream);
-      processorNode = audioCtx.createScriptProcessor(4096, 1, 1);
-      processorNode.onaudioprocess = function(ev){
-        floatChunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+      if (session.generation !== recordingGeneration || !holdActive){
+        cleanupMic(session);
+        return;
+      }
+      session.context = new (window.AudioContext || window.webkitAudioContext)();
+      if (session.context.resume) await session.context.resume();
+      if (session.generation !== recordingGeneration || !holdActive){
+        cleanupMic(session);
+        return;
+      }
+      session.source = session.context.createMediaStreamSource(session.stream);
+      session.processor = session.context.createScriptProcessor(4096, 1, 1);
+      session.processor.onaudioprocess = function(ev){
+        if (micState !== "recording" || session !== micSession) return;
+        // 每块即时降采样，限制内存；不积累高采样率的原始浮点流。
+        var chunk = downsampleTo16k(new Float32Array(ev.inputBuffer.getChannelData(0)), session.context.sampleRate);
+        var remaining = MAX_RECORDING_MS * 16 - session.samples;
+        if (chunk.length > remaining) chunk = chunk.slice(0, remaining);
+        session.chunks.push(chunk);
+        session.samples += chunk.length;
+        // 后台标签页可能延迟定时器，样本计数也必须独立执行硬上限。
+        if (session.samples >= MAX_RECORDING_MS * 16) stopRecording();
       };
-      // ScriptProcessor only runs when connected to the destination; keep it silent.
-      muteNode = audioCtx.createGain();
-      muteNode.gain.value = 0;
-      sourceNode.connect(processorNode);
-      processorNode.connect(muteNode);
-      muteNode.connect(audioCtx.destination);
-
-      isRecording = true;
-      micBtn.classList.add("recording");
-      micBtn.textContent = "🔴 松开完成录音...";
-      micStatus.textContent = "正在录音（16 kHz PCM），请清晰口述...";
+      session.mute = session.context.createGain();
+      session.mute.gain.value = 0;
+      session.source.connect(session.processor);
+      session.processor.connect(session.mute);
+      session.mute.connect(session.context.destination);
+      setMicState("recording");
+      maxRecordingTimer = setTimeout(stopRecording, MAX_RECORDING_MS);
+      micStatus.textContent = "正在录音（最多 60 秒），松开发送；失焦取消。";
     } catch(err){
+      cleanupMic(session);
+      // 旧请求失败不能关闭下一次录音或改写其 UI 状态。
+      if (session.generation !== recordingGeneration) return;
+      holdActive = false;
       micStatus.textContent = "获取麦克风失败: " + err.message;
-      cleanupMic();
+      setMicState("idle");
     }
   }
 
-  function cleanupMic(){
-    if (processorNode){ try { processorNode.disconnect(); } catch(e){} processorNode = null; }
-    if (sourceNode){ try { sourceNode.disconnect(); } catch(e){} sourceNode = null; }
-    if (muteNode){ try { muteNode.disconnect(); } catch(e){} muteNode = null; }
-    if (micStream){ micStream.getTracks().forEach(function(t){ t.stop(); }); micStream = null; }
-    if (audioCtx){ try { audioCtx.close(); } catch(e){} audioCtx = null; }
+  function cleanupMic(session){
+    if (!session) return;
+    if (micSession === session){
+      if (maxRecordingTimer !== null){ clearTimeout(maxRecordingTimer); maxRecordingTimer = null; }
+      micSession = null;
+    }
+    if (session.processor) session.processor.onaudioprocess = null;
+    [session.processor, session.source, session.mute].forEach(function(node){
+      if (node){ try { node.disconnect(); } catch(e){} }
+    });
+    if (session.stream) session.stream.getTracks().forEach(function(t){ t.stop(); });
+    if (session.context){
+      try { Promise.resolve(session.context.close()).catch(function(){}); } catch(e){}
+    }
+    session.chunks = [];
   }
 
   function concatFloat(chunks){
@@ -380,40 +423,82 @@
     return out;
   }
 
+  function cancelRecording(){
+    if (micState === "uploading") return;
+    holdActive = false;
+    recordingGeneration++;
+    cleanupMic(micSession);
+    setMicState("idle");
+    micStatus.textContent = "录音已取消，未发送。";
+  }
+
   async function stopRecording(){
-    if (!isRecording) return;
-    isRecording = false;
-    micBtn.classList.remove("recording");
-    micBtn.textContent = "🎙️ 按住说话 (或按住空格)";
-
-    var inRate = audioCtx ? audioCtx.sampleRate : 48000;
-    var samples = concatFloat(floatChunks);
-    floatChunks = [];
-    cleanupMic();
-
-    if (samples.length < 1600){ // < 0.1 s
+    holdActive = false;
+    if (micState === "requesting"){ cancelRecording(); return; }
+    if (micState !== "recording") return;
+    var samples = concatFloat(micSession.chunks);
+    cleanupMic(micSession);
+    if (samples.length < 1600){
       micStatus.textContent = "录音太短，请按住多说一会儿。";
+      setMicState("idle");
       return;
     }
-
-    var pcm = floatToInt16(downsampleTo16k(samples, inRate));
+    setMicState("uploading");
+    var pcm = floatToInt16(samples);
     micStatus.textContent = "正在处理识别与注入...";
     try {
       var res = await apiFetch("/chat?mode=" + encodeURIComponent(currentGatewayMode), {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: pcm.buffer
+        method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: pcm.buffer
       });
-      if (res.ok){
-        micStatus.textContent = "已完成！查看控制台或光标处文本";
-        refresh();
-      } else {
+      if (!res.ok){
         var detail = "";
         try { detail = (await res.json()).error || ""; } catch(e){}
-        micStatus.textContent = "请求失败 HTTP " + res.status + (detail ? " · " + detail : "");
+        throw new Error("HTTP " + res.status + (detail ? " · " + detail : ""));
       }
+      var payload = await res.arrayBuffer();
+      if (payload.byteLength < 4) throw new Error("无效语音响应");
+      var metaLength = new DataView(payload).getUint32(0, false);
+      if (metaLength > payload.byteLength - 4) throw new Error("无效响应元数据");
+      var meta = JSON.parse(new TextDecoder().decode(new Uint8Array(payload, 4, metaLength)));
+      if (meta.kind === "error") micStatus.textContent = "处理失败：" + (meta.reply || meta.error);
+      else if (meta.kind === "miss") micStatus.textContent = meta.reply || "没有听清，请重试。";
+      else micStatus.textContent = meta.typed ? "已键入：" + meta.typed : (meta.reply || "已完成");
+      // 消费 PCM 问答音频；浏览器若限制自动播放，保留明确的文字回复。
+      var pcmOffset = 4 + metaLength;
+      if ((meta.speak || (meta.speak === undefined && meta.mode === "dialog")) && payload.byteLength > pcmOffset){
+        try { await playReply(payload.slice(pcmOffset)); } catch(e){}
+      }
+      refresh();
     } catch(err){
-      micStatus.textContent = "发送异常: " + err.message;
+      micStatus.textContent = "请求失败: " + err.message;
+    } finally {
+      setMicState("idle");
+    }
+  }
+
+  async function playReply(data){
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var timer = null;
+    try {
+      await Promise.race([
+        (async function(){
+          if (ctx.resume) await ctx.resume();
+          var count = Math.floor(data.byteLength / 2), view = new DataView(data);
+          var buffer = ctx.createBuffer(1, count, 16000), output = buffer.getChannelData(0);
+          for (var i = 0; i < count; i++) output[i] = view.getInt16(i * 2, true) / 32768;
+          var source = ctx.createBufferSource();
+          source.buffer = buffer;
+          source.connect(ctx.destination);
+          await new Promise(function(resolve){ source.onended = resolve; source.start(); });
+        })(),
+        new Promise(function(_, reject){
+          timer = setTimeout(function(){ reject(new Error("音频播放超时")); },
+            Math.min(125000, 5000 + data.byteLength / 32));
+        })
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      try { await ctx.close(); } catch(e){}
     }
   }
 
@@ -435,16 +520,20 @@
   window.addEventListener("mouseup", stopRecording);
   micBtn.addEventListener("touchstart", function(e){ e.preventDefault(); startRecording(); });
   window.addEventListener("touchend", stopRecording);
+  window.addEventListener("touchcancel", cancelRecording);
+  window.addEventListener("blur", cancelRecording);
+  window.addEventListener("pagehide", cancelRecording);
+  document.addEventListener("visibilitychange", function(){ if (document.hidden) cancelRecording(); });
 
   // Spacebar push-to-talk support (when not in input)
   window.addEventListener("keydown", function(e){
-    if (e.code === "Space" && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !isRecording){
+    if (e.code === "Space" && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable && !e.repeat){
       e.preventDefault();
       startRecording();
     }
   });
   window.addEventListener("keyup", function(e){
-    if (e.code === "Space" && isRecording){
+    if (e.code === "Space" && holdActive){
       e.preventDefault();
       stopRecording();
     }

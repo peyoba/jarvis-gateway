@@ -1,0 +1,150 @@
+[
+  {
+    "probe": "missing_env_fails_closed",
+    "rejected": true,
+    "error_type": "ConfigError"
+  },
+  {
+    "probe": "wav_amplification_rejected",
+    "input_bytes": 172,
+    "rejected": true,
+    "error_type": "AudioLimitError"
+  },
+  {
+    "probe": "raw_router_打字速度比以前快了",
+    "status": 200,
+    "metadata": {
+      "heard": "打字速度比以前快了",
+      "reply": "[已原字键入] 打字速度比以前快了",
+      "typed": "打字速度比以前快了",
+      "mode": "raw",
+      "kind": "ok",
+      "error": "",
+      "speak": false
+    },
+    "polish_calls": []
+  },
+  {
+    "probe": "raw_router_整理一下今天的会议纪要",
+    "status": 200,
+    "metadata": {
+      "heard": "整理一下今天的会议纪要",
+      "reply": "[已原字键入] 整理一下今天的会议纪要",
+      "typed": "整理一下今天的会议纪要",
+      "mode": "raw",
+      "kind": "ok",
+      "error": "",
+      "speak": false
+    },
+    "polish_calls": []
+  },
+  {
+    "probe": "raw_router_谢谢大家的帮助，我明天继续整理文档",
+    "status": 200,
+    "metadata": {
+      "heard": "谢谢大家的帮助，我明天继续整理文档",
+      "reply": "[已原字键入] 谢谢大家的帮助，我明天继续整理文档",
+      "typed": "谢谢大家的帮助，我明天继续整理文档",
+      "mode": "raw",
+      "kind": "ok",
+      "error": "",
+      "speak": false
+    },
+    "polish_calls": []
+  },
+  {
+    "probe": "raw_router_好",
+    "status": 200,
+    "metadata": {
+      "heard": "好",
+      "reply": "[已原字键入] 好",
+      "typed": "好",
+      "mode": "raw",
+      "kind": "ok",
+      "error": "",
+      "speak": false
+    },
+    "polish_calls": []
+  },
+  {
+    "probe": "documented_post_toggle",
+    "status": 200,
+    "body": "{\"current_mode\": \"polish\", \"mode\": \"polish\"}"
+  },
+  {
+    "probe": "origin_only_mutation",
+    "status": 403,
+    "mode": "polish"
+  },
+  {
+    "probe": "same_site_different_origin_mutation",
+    "status": 403,
+    "mode": "polish"
+  },
+  {
+    "probe": "cross_origin_form_without_fetch_metadata",
+    "status": 403,
+    "mode": "polish"
+  },
+  {
+    "probe": "injection_failure_is_reported_as_error",
+    "status": 200,
+    "metadata": {
+      "heard": "普通听写文本",
+      "reply": "[键入失败] 请检查 macOS 辅助功能权限",
+      "typed": "",
+      "mode": "raw",
+      "kind": "error",
+      "error": "injection_failed",
+      "speak": false
+    },
+    "recorded": {
+      "ts": 1792929955.795594,
+      "mode": "raw",
+      "heard": "普通听写文本",
+      "reply": "[键入失败] 请检查 macOS 辅助功能权限",
+      "typed": "",
+      "elapsed": 0.0,
+      "kind": "error"
+    }
+  },
+  {
+    "probe": "parallel_requests_are_rejected",
+    "second_status": 429,
+    "injected_order": [
+      "第一段听写内容"
+    ]
+  },
+  {
+    "probe": "clipboard_restore_preserves_new_copy",
+    "actual": "user copied something new"
+  },
+  {
+    "probe": "opentoken_falls_back_to_local_estimate",
+    "total": 100
+  },
+  {
+    "probe": "launcher_whisper_failure_exit",
+    "returncode": 1
+  },
+  {
+    "probe": "launcher_gateway_failure_rolls_back",
+    "returncode": 1,
+    "terminate_calls": 2,
+    "remaining_pid_files": 0
+  },
+  {
+    "probe": "launcher_existing_gateway_missing_whisper",
+    "returncode": 0,
+    "spawns": 1
+  },
+  {
+    "probe": "launcher_preserves_unidentified_listener",
+    "kill_signals": []
+  },
+  {
+    "probe": "shutdown_releases_listener",
+    "thread_stopped": true,
+    "port_reusable": true
+  }
+]

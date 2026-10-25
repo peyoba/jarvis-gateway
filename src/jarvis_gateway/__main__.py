@@ -9,7 +9,7 @@ import os
 import sys
 
 from jarvis_gateway import __version__
-from jarvis_gateway.config import load_config
+from jarvis_gateway.config import ConfigError, load_config, validate_config
 from jarvis_gateway.server.server import UnifiedGatewayServer
 
 
@@ -40,14 +40,18 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         cfg = load_config(args.config)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ConfigError) as exc:
         parser.error(str(exc))
     if args.host:
         cfg.setdefault("gateway", {})["host"] = args.host
     if args.port:
         cfg.setdefault("gateway", {})["port"] = args.port
 
-    server = UnifiedGatewayServer(cfg, project_root=os.getcwd())
+    try:
+        validate_config(cfg)
+        server = UnifiedGatewayServer(cfg, project_root=os.getcwd())
+    except ConfigError as exc:
+        parser.error(str(exc))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

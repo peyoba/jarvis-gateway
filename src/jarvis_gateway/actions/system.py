@@ -67,7 +67,7 @@ class SystemActionExecutor:
             p = subprocess.run(cmd_args, capture_output=True, text=True, timeout=timeout)
             return p.stdout.strip()
         except Exception as e:
-            print(f"[Action] 执行系统命令异常 ({cmd_args}): {e}", flush=True)
+            print(f"[Action] 执行系统命令异常 ({cmd_args[0] if cmd_args else 'unknown'}): {type(e).__name__}", flush=True)
             return ""
 
     @classmethod
@@ -76,7 +76,20 @@ class SystemActionExecutor:
         if not action_str:
             return
         action_str = action_str.strip()
-        print(f"[*] 执行 Mac 动作: {action_str}", flush=True)
+        if action_str.startswith("set_volume:"):
+            action_kind = "set_volume"
+        elif action_str.startswith("open_app:"):
+            action_kind = "open_app"
+        elif action_str in {
+            "volume_up", "volume_down", "mute", "unmute",
+            "music_play", "music_pause", "music_next", "lock_screen",
+        }:
+            action_kind = action_str
+        else:
+            action_kind = "unknown"
+        # Never print model-controlled action text: an unknown action may contain
+        # the complete private transcript returned by the LLM.
+        print(f"[*] 执行 Mac 动作: {action_kind}", flush=True)
 
         # 1. Volume setting
         if action_str.startswith("set_volume:"):
@@ -115,7 +128,7 @@ class SystemActionExecutor:
             if SAFE_APP_PATTERN.match(app):
                 cls._run_safe(["open", "-a", app])
             else:
-                print(f"[!] 拒绝执行非法应用名称: '{app}'", flush=True)
+                print("[!] 拒绝执行非法应用名称", flush=True)
 
         # 4. Lock screen
         elif action_str == "lock_screen":
