@@ -4,6 +4,7 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from jarvis_gateway.llm.client import LLMUsage
 from jarvis_gateway.services.token_service import TokenService
 
 
@@ -66,3 +67,36 @@ def test_parser_rejects_truncated_or_failed_output(monkeypatch):
         lambda *a, **kw: SimpleNamespace(returncode=1, stdout=text + " 100"),
     )
     assert service._fetch_opentoken_stats() is None
+
+
+def test_zero_llm_calls_do_not_create_estimated_usage():
+    service = TokenService()
+    service.add_llm_usage(LLMUsage())
+    service.add_local_tokens(0)
+    snapshot = service.get_snapshot()
+    assert snapshot["total"] == 0 and snapshot["tools"] == {}
+    assert snapshot["last_update"] == 0 and snapshot["llm_calls"] == 0
+    assert not snapshot["estimated"] and not snapshot["incomplete"]
+
+
+def test_provider_reported_tokens_keep_session_scope_and_unknown_failed_usage():
+    service = TokenService()
+    service.add_llm_usage(LLMUsage(calls=1, total_tokens=17))
+    snapshot = service.get_snapshot()
+    assert snapshot["total"] == 17 and snapshot["source"] == "GatewayUsage"
+    assert not snapshot["estimated"] and snapshot["llm_calls"] == 1
+    assert "非全账户账单" in service.get_stats_text()
+    service.add_llm_usage(LLMUsage(calls=1, incomplete=True))
+    snapshot = service.get_snapshot()
+    assert snapshot["total"] == 17 and snapshot["llm_calls"] == 2
+    assert snapshot["incomplete"]
+    assert "用量未知" in service.get_stats_text()
+
+
+def test_mixed_reported_and_estimated_tokens_are_labelled_estimated():
+    service = TokenService()
+    service.add_llm_usage(LLMUsage(calls=1, total_tokens=17))
+    service.add_llm_usage(LLMUsage(calls=1, total_tokens=50, estimated=True))
+    snapshot = service.get_snapshot()
+    assert snapshot["total"] == 67 and snapshot["estimated"]
+    assert snapshot["source"] == "LocalEstimator"

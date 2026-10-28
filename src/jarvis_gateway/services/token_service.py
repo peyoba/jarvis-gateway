@@ -12,7 +12,10 @@ import subprocess
 import threading
 import time
 from datetime import date
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from jarvis_gateway.llm.client import LLMUsage
 
 REFERENCE_DAILY_TOKENS = 5_000_000  # UI progress reference only, not an account balance
 
@@ -47,6 +50,9 @@ class TokenService:
         self._day = date.today()
         self._local_tools: Dict[str, int] = {}
         self._local_update = 0.0
+        self._local_estimated = False
+        self._local_incomplete = False
+        self._llm_calls = 0
         self._external: Optional[Dict[str, int]] = None
         self._external_update = 0.0
         self._external_ok = False
@@ -69,15 +75,35 @@ class TokenService:
             self._day = today
             self._local_tools = {}
             self._local_update = 0.0
+            self._local_estimated = False
+            self._local_incomplete = False
+            self._llm_calls = 0
             self._external = None
             self._external_ok = False
             self._external_update = 0.0
 
     def add_local_tokens(self, count: int, tool_name: str = "Jarvis"):
         """始终保留本地估算；外部恢复后仅展示外部值，不相加。"""
+        count = max(0, int(count))
+        if not count:
+            return
         with self._lock:
             self._reset_day()
-            self._local_tools[tool_name] = self._local_tools.get(tool_name, 0) + max(0, int(count))
+            self._local_tools[tool_name] = self._local_tools.get(tool_name, 0) + count
+            self._local_estimated = True
+            self._local_update = time.time()
+
+    def add_llm_usage(self, usage: LLMUsage):
+        """优先记录返回的供应商用量；零调用不增 Token，失败账单显式标为未知。"""
+        if not usage.calls:
+            return
+        with self._lock:
+            self._reset_day()
+            self._llm_calls += usage.calls
+            if usage.total_tokens:
+                self._local_tools["Jarvis"] = self._local_tools.get("Jarvis", 0) + usage.total_tokens
+            self._local_estimated |= usage.estimated
+            self._local_incomplete |= usage.incomplete
             self._local_update = time.time()
 
     def _fetch_opentoken_stats(self) -> Optional[Dict[str, int]]:
@@ -157,17 +183,25 @@ class TokenService:
                 "labels": labels, "tools": tools,
                 "active_tool": active[0][0] if active else "Jarvis",
                 "last_update": self._external_update if external else self._local_update,
-                "is_busy": bool(active), "source": "OpenToken" if external else "LocalEstimator",
+                "is_busy": bool(active),
+                "source": "OpenToken" if external else (
+                    "GatewayUsage" if self._llm_calls and not self._local_estimated else "LocalEstimator"
+                ),
                 "health": "ok" if external else ("degraded" if self.opentoken_bin else "local"),
-                "external_last_update": self._external_update, "estimated": not external,
+                "external_last_update": self._external_update,
+                "estimated": not external and self._local_estimated,
+                "incomplete": not external and self._local_incomplete,
+                "llm_calls": self._llm_calls,
                 "date": self._day.isoformat(),
             })
 
     def get_stats_text(self) -> str:
         data = self.get_snapshot()
         total = data.get("total", 0)
-        if data.get("estimated"):
-            return f"本次网关会话估算使用 {data.get('total_str', '0')} Token，非全账户账单。"
+        if data.get("source") != "OpenToken":
+            label = "估算使用" if data.get("estimated") else "已知用量"
+            unknown = "失败或超时请求的额外用量未知。" if data.get("incomplete") else ""
+            return f"本次网关会话{label} {data.get('total_str', '0')} Token，非全账户账单。" + unknown
         if not total:
             return "今天还没有消耗 Token。"
         total_str = data.get("total_str") or f"{total/10000:.1f}万"

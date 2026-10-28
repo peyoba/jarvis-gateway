@@ -39,6 +39,8 @@ def test_native_connection_uses_custom_port_and_resolved_auth(tmp_path):
         str(ROOT / "build/main.swift"), "-o", str(executable),
     ], capture_output=True, text=True, timeout=120)
     assert build.returncode == 0, build.stderr
+    # 可执行文件的相邻测试工程优先于真实 checkout，回归失败也不探测现有服务。
+    (tmp_path / "jarvis").touch()
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -76,6 +78,32 @@ def test_native_connection_uses_custom_port_and_resolved_auth(tmp_path):
             assert "status=ready" in result.stdout
             assert expected not in result.stdout
             assert requests[-1] == ("/status?summary=1", expected)
+        selected = tmp_path / "selected.json"
+        selected.write_text(json.dumps({"gateway": {
+            "port": httpd.server_port, "auth_token": "test-selected",
+        }}), encoding="utf-8")
+        environment = {**os.environ, "JARVIS_CONFIG": str(selected)}
+        result = subprocess.run(
+            [str(executable), "--selftest"], env=environment,
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert requests[-1] == ("/status?summary=1", "test-selected")
+        # 显式路径覆盖环境变量，同一选择同时供菜单轮询和自检使用。
+        result = subprocess.run(
+            [str(executable), "--selftest", "--config", str(config)],
+            env=environment, capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert requests[-1] == ("/status?summary=1", "test-file")
+        before = len(requests)
+        environment["JARVIS_CONFIG"] = str(tmp_path / "missing.json")
+        result = subprocess.run(
+            [str(executable), "--selftest"], env=environment,
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 1
+        assert len(requests) == before  # 缺失显式配置不能悄悄访问默认服务。
     finally:
         httpd.shutdown()
         httpd.server_close()

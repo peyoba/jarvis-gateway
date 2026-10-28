@@ -4,6 +4,7 @@ Thread-safe runtime state management and status snapshot builder.
 
 from __future__ import annotations
 
+import copy
 import os
 import socket
 import subprocess
@@ -69,6 +70,11 @@ class GatewayState:
         mode: str,
         elapsed: float,
         kind: str = "ok",
+        *,
+        error: str = "",
+        polish: Dict[str, Any] | None = None,
+        llm_usage: Dict[str, Any] | None = None,
+        action_results: List[Dict[str, Any]] | None = None,
     ):
         with self._lock:
             self._stats["turns"] += 1
@@ -82,6 +88,10 @@ class GatewayState:
                 "typed": typed or "",
                 "elapsed": round(elapsed, 2),
                 "kind": kind,
+                "error": error,
+                "polish": dict(polish or {}),
+                "llm_usage": dict(llm_usage or {}),
+                "action_results": copy.deepcopy(action_results or []),
             })
             del self._recent_turns[12:]
             self._status_cache["ts"] = 0.0
@@ -135,7 +145,7 @@ class GatewayState:
             if self._status_cache["data"] is not None and (now - self._status_cache["ts"] < 2.0):
                 return self._status_cache["data"]
 
-            recent = [dict(x) for x in self._recent_turns]
+            recent = copy.deepcopy(self._recent_turns)
             stats = dict(self._stats)
             mode = self._mode
             speak_typed = self._speak_typed

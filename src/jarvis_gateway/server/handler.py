@@ -13,13 +13,19 @@ import os
 import re
 import struct
 import time
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 from jarvis_gateway import __version__
 from jarvis_gateway.actions.injector import CursorInjector
-from jarvis_gateway.actions.system import SystemActionExecutor, strip_wake_word
+from jarvis_gateway.actions.system import (
+    ActionResult,
+    SystemActionExecutor,
+    action_failure_reply,
+    strip_wake_word,
+)
 from jarvis_gateway.asr.manager import is_hallucination
 from jarvis_gateway.audio.converter import (
     MAX_PCM_BYTES,
@@ -27,6 +33,7 @@ from jarvis_gateway.audio.converter import (
     temporary_wav_file,
     wav_bytes_to_pcm16,
 )
+from jarvis_gateway.llm.client import LLMUsage
 
 if TYPE_CHECKING:
     from jarvis_gateway.server.server import UnifiedGatewayServer
@@ -427,6 +434,9 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         typed = ""
         error = ""
         speak = False
+        usage = LLMUsage()
+        polish_info = {"requested": False, "applied": False, "reason": "", "channel": ""}
+        action_results = []
         if explicit:
             command, content = explicit.groups()
             polish = command not in ("原字", "直接打", "打字")
@@ -436,43 +446,91 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
             content = utterance
             polish = mode == "polish" or (mode == "auto" and audio_sec >= server.polish_threshold)
         if is_typing:
-            attempted = server.llm_manager.polish_text(content) if polish else content
+            attempted = content
+            prefix = "[已原字键入] "
             if polish:
-                server.token_service.add_local_tokens(len(attempted) * 2)
+                result = server.llm_manager.polish_text_result(content)
+                attempted, usage = result.text, result.usage
+                polish_info = {
+                    "requested": True, "applied": result.polished,
+                    "reason": result.reason, "channel": result.channel,
+                }
+                if result.polished:
+                    prefix = "[已AI润色] "
+                elif result.reason == "short_text":
+                    prefix = "[短句已原字键入] "
+                elif result.reason == "llm_timeout":
+                    prefix = "[润色超时，已原字键入] "
+                else:
+                    prefix = "[润色不可用，已原字键入] "
             if CursorInjector.inject_text(attempted):
                 typed = attempted
-                reply = ("[已AI润色] " if polish else "[已原字键入] ") + typed
+                reply = prefix + typed
             else:
                 reply = "[键入失败] 请检查 macOS 辅助功能权限"
                 error = "injection_failed"
             speak = server.state.speak_typed
         else:
-            reply = "我在，请说。" if not utterance else SystemActionExecutor.match_fast_command(
-                utterance, server.token_service, server.weather_service
-            )
-            if not reply:
-                reply, actions = server.llm_manager.chat(utterance)
-                server.token_service.add_local_tokens(len(reply) * 2)
-                if getattr(server.llm_manager, "last_chat_failed", False):
-                    error = "llm_unavailable"
-                for action in actions:
+            plan = SystemActionExecutor.plan_fast_command(
+                utterance, server.token_service, server.weather_service,
+            ) if utterance else None
+            if not utterance:
+                reply = "我在，请说。"
+            elif plan is not None:
+                reply, action = plan
+                if action:
+                    outcome = self._execute_action(action)
+                    action_results.append(asdict(outcome))
+                    if not outcome.success:
+                        reply, error = action_failure_reply(outcome), outcome.error
+            else:
+                result = server.llm_manager.chat_result(utterance)
+                reply, usage = result.reply, result.usage
+                if not result.success:
+                    error = result.error or "llm_unavailable"
+                for action in result.actions if result.success else ():
                     if action == "query_tokens":
                         reply = server.token_service.get_stats_text()
                     elif action == "query_weather":
                         reply = server.weather_service.get_weather_text()
                     else:
-                        SystemActionExecutor.execute_action(action)
+                        outcome = self._execute_action(action)
+                        action_results.append(asdict(outcome))
+                        if not outcome.success:
+                            reply, error = action_failure_reply(outcome), outcome.error
+                            break  # 失败后不继续执行后续模型动作，不误报全部成功。
+                if not reply and not error:
+                    reply = "电脑控制已完成。" if action_results else "我在，请说。"
             speak = True
-        self._send_turn(heard, reply, typed, mode, "error" if error else "ok", error, speak, t_req)
+        server.token_service.add_llm_usage(usage)
+        self._send_turn(
+            heard, reply, typed, mode, "error" if error else "ok", error, speak, t_req,
+            polish_info=polish_info, usage=usage, action_results=action_results,
+        )
 
-    def _send_turn(self, heard, reply, typed, mode, kind, error, speak, started):
+    @staticmethod
+    def _execute_action(action):
+        result = SystemActionExecutor.execute_action(action)
+        # 旧/不完整的执行器没有返回值时也不能当作成功。
+        return result if isinstance(result, ActionResult) else ActionResult(False, "action_failed")
+
+    def _send_turn(
+        self, heard, reply, typed, mode, kind, error, speak, started,
+        *, polish_info=None, usage=None, action_results=None,
+    ):
         server = self.gateway_server
         pcm = server.tts.synthesize(reply) if speak else bytes(3200)
         meta = {"heard": heard, "reply": reply, "typed": typed, "mode": mode,
-                "kind": kind, "error": error, "speak": speak}
+                "kind": kind, "error": error, "speak": speak,
+                "polish": polish_info or {"requested": False, "applied": False, "reason": "", "channel": ""},
+                "llm_usage": asdict(usage or LLMUsage()), "action_results": action_results or []}
         encoded = json.dumps(meta, ensure_ascii=False).encode("utf-8")
         payload = struct.pack("!I", len(encoded)) + encoded + pcm
-        server.state.record_turn(heard, reply, typed, mode, time.monotonic() - started, kind)
+        server.state.record_turn(
+            heard, reply, typed, mode, time.monotonic() - started, kind,
+            error=error, polish=meta["polish"], llm_usage=meta["llm_usage"],
+            action_results=meta["action_results"],
+        )
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(payload)))

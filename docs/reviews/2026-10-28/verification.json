@@ -1,0 +1,93 @@
+{
+  "client_date": "2026-10-28",
+  "baseline": "e413f40154cf788fbec9372d2199005a3a75284c",
+  "python_version": "3.14.6",
+  "existing_services_operated": false,
+  "private_config_modified": false,
+  "existing_app_replaced": false,
+  "remote_push_or_deployment": false,
+  "regressions": {
+    "passed": 185,
+    "seconds": 29.58,
+    "failures": 0
+  },
+  "sdk_deadline": {
+    "chat_result": {
+      "budget_sec": 0.2,
+      "elapsed_sec": 0.204,
+      "connection_disconnected": true
+    },
+    "polish_text_result": {
+      "budget_sec": 0.2,
+      "elapsed_sec": 0.204,
+      "connection_disconnected": true
+    }
+  },
+  "python_ast": {
+    "passed": true,
+    "files": 48
+  },
+  "common_secret_formats": {
+    "text_files_scanned": 77,
+    "matches_without_values": [],
+    "not_exhaustive": true
+  },
+  "snapshot": {
+    "includes_uncommitted_changes": true,
+    "public_files_copied": 80
+  },
+  "isolated_package": {
+    "sdist": "jarvis_gateway-2.3.1.tar.gz",
+    "wheel": "jarvis_gateway-2.3.1-py3-none-any.whl",
+    "resource_files_matched": 29,
+    "private_runtime_files_excluded": true,
+    "installed_wheel_tests_passed": 137,
+    "payload_sha256": {
+      "jarvis_gateway/__init__.py": "de634463c94363a04fe88427d83184faf6b030cebeec488a1c7202e236d74a1a",
+      "jarvis_gateway/__main__.py": "de8b816de93fb619c306239c605a247bf87c5fc7558a2e819dcce62459fe1102",
+      "jarvis_gateway/actions/__init__.py": "f5ccaee6f3f5cc20672aeed675d1f6fd91dfd30df232bfca1a852e64dbd16757",
+      "jarvis_gateway/actions/injector.py": "630890520111dc0b817f37c3585a2e4e69d5c9a61f5ccfefaa67730796783684",
+      "jarvis_gateway/actions/system.py": "6de14ece5511c44c4a1717ad1278f5a715ce49c782dd976fd4600b19fbdb2fdb",
+      "jarvis_gateway/asr/__init__.py": "77aa385b9bcca3fe57e3e9869a0e897128715e7d631ebc93b0af89d79244156b",
+      "jarvis_gateway/asr/base.py": "c780e1c9b5ea235c91eaf41ab0634b7eea813251604f4f1c2f3ae4901992aebb",
+      "jarvis_gateway/asr/manager.py": "4770185f38b61c4fa88c8880f69c9f5b15ddbf654d875aca24f37248f2836248",
+      "jarvis_gateway/asr/whisper_cli.py": "15fe29cb18a64eab18b03a347700a1c7092d75498f0316b03c548425b7f41ed1",
+      "jarvis_gateway/asr/whisper_server.py": "843ce5ce00656f7514bc0004fc17bd89e068c8ac48eb718b1f72760d8e952963",
+      "jarvis_gateway/audio/__init__.py": "f91648df9ffb5e9031d0380c3d3e262a9080dec88426e7cc9e1eedf9f13d2ce0",
+      "jarvis_gateway/audio/agc.py": "14c9105edb46dc306a122d464d9e7e7e0b28ba5c2c0761c2a0d85e76cd81d9c7",
+      "jarvis_gateway/audio/converter.py": "6a5279bfbb3717743d504201c355ec9b7217f2bd4b3902dec13ea05777ba3450",
+      "jarvis_gateway/config.py": "870d329e89cd394211227df017ca67e811d227d3cd9729167f51371d5599bfad",
+      "jarvis_gateway/llm/__init__.py": "d1063cf3f9aabb4f02324aa9ff51926cfce2a1ac74c9cab2f5171c6633bdf15b",
+      "jarvis_gateway/llm/client.py": "88ee0fddea61c8bc58657b2a288a9707418d06ff173bf01d8878f0d10c2e429f",
+      "jarvis_gateway/llm/prompts.py": "cc809ff9bdac6de40c53225e253560eb0004e4cd53cf3d395947115d1e7e6789",
+      "jarvis_gateway/log_worker.py": "36dfd81136fb7f051ff2ed79517c83ac5d4bd9fad3db198ca8710e375e05b214",
+      "jarvis_gateway/server/__init__.py": "6d890f74ce3350751f9cbda3c2356a5b8a0867127bef27de301a3c862a3aee81",
+      "jarvis_gateway/server/handler.py": "3014edea433ca74cb76cda1affa1c8897d43d3c0c362b950acba2756759c1fa8",
+      "jarvis_gateway/server/server.py": "1f2a311caa3d02791b56f574581ed634d8b94eedcb5318101be05f2b457a933d",
+      "jarvis_gateway/services/__init__.py": "164ce1ec1a8a63089d4c69d3e1144c180bd914526b71aed2eda77f6ca270a802",
+      "jarvis_gateway/services/token_service.py": "16bf711824a03c73ab8bf7e5a32a22c25af0f29a42a1eaf6f3f45cf665b2b789",
+      "jarvis_gateway/services/weather_service.py": "144cd20bf09f48f70d8d2abe80ef02dec7d4365f0f561e1a1d578f74747873ba",
+      "jarvis_gateway/state.py": "c2e9900649b8ea65ccbc7db921321e0b945791d3b0d3673f1c47833d20393d49",
+      "jarvis_gateway/tts/__init__.py": "730ac31306ea55372d489fa5c9f6b9c8917fbe317fe58f35cf813ed97d06a4ed",
+      "jarvis_gateway/tts/base.py": "718d54ef497c505a709b6dac6f6fc5b39667137cc005bd110c0f7e3667e448ae",
+      "jarvis_gateway/tts/mac_say.py": "a2cfd8143bd2d9adb509445844a9f299ce06af5185560a32132c3914e96220cc",
+      "jarvis_gateway/web/dashboard.html": "13a71a8a5586723b5b72ed22af0a531135dd50f24278f576f54001e1b6773290"
+    }
+  },
+  "bash_syntax": {
+    "passed": true,
+    "files": 8
+  },
+  "swift": {
+    "typecheck_passed": true,
+    "app_build_passed": true,
+    "ad_hoc_signature_verified": true,
+    "deployment_target": "13.0",
+    "app_ui_launched": false,
+    "existing_app_replaced": false
+  },
+  "temporary_build_directories_cleaned": true,
+  "ruff": true,
+  "pip_check": true,
+  "diff_check": true
+}

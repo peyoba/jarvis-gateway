@@ -101,12 +101,24 @@ def _data_port(cfg):
     return int(cfg.get("data_service", {}).get("port", 8080))
 
 
-def load_config():
+def selected_config_path(explicit_path=None):
+    """显式路径 > JARVIS_CONFIG > 工程配置 > 标准位置；所有入口复用结果。"""
+    src = str(ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from jarvis_gateway.config import find_config_file
+
+    if explicit_path or os.environ.get("JARVIS_CONFIG"):
+        return find_config_file(explicit_path)
+    return find_config_file(CONFIG_PATH if CONFIG_PATH.is_file() else None)
+
+
+def load_config(config_path=None):
     """共享安全配置加载器；配置失败必须阻止启动，不回退绕过鉴权。"""
-    sys.path.insert(0, str(ROOT / "src"))
+    target = selected_config_path(config_path)
     from jarvis_gateway.config import load_config as shared_load_config
 
-    return shared_load_config(CONFIG_PATH if CONFIG_PATH.exists() else None)
+    return shared_load_config(target)
 
 
 def port_alive(port, host="127.0.0.1", timeout=0.3):
@@ -166,10 +178,26 @@ def _record_process(name, proc, port):
     path.chmod(0o600)
 
 
-def _managed_record(name):
+def _read_process_record(name):
     try:
         record = json.loads((RUN_DIR / f"{name}.pid").read_text(encoding="utf-8"))
-        pid = int(record["pid"])
+        if not isinstance(record, dict):
+            return None
+        pid, port = record.get("pid"), record.get("port")
+        if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1
+                or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535):
+            return None
+        return record
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _managed_record(name):
+    try:
+        record = _read_process_record(name)
+        if record is None:
+            return None
+        pid = record["pid"]
         # PID + 启动时间 + 本项目日志代理路径，共同排除 PID 复用/同名程序。
         command = pid_command(pid)
         if (pid <= 1 or not record.get("started")
@@ -182,6 +210,39 @@ def _managed_record(name):
         return record
     except (OSError, ValueError, TypeError, KeyError):
         return None
+
+
+def _stop_managed(name, record, label):
+    pid = record["pid"]
+    # 在真正发送信号前再次验证，不能仅依赖端口或先前读取的 PID。
+    if _managed_record(name) != record:
+        return False
+    try:
+        os.killpg(pid, signal.SIGTERM)
+        for _ in range(50):
+            if _managed_record(name) != record:
+                break
+            time.sleep(0.1)
+        # 强杀前重新校验，不能凭旧 PID 操作一个后来复用的进程。
+        if _managed_record(name) == record:
+            os.killpg(pid, signal.SIGKILL)
+            for _ in range(10):
+                if _managed_record(name) != record:
+                    break
+                time.sleep(0.1)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        print(f"{YELLOW}无法停止 {label}（受管 PID {pid}），请检查进程权限{RESET}")
+        return False
+    if _managed_record(name) == record:
+        print(f"{YELLOW}{label} 尚未退出（受管 PID {pid}）{RESET}")
+        return False
+    # 若另一个启动器已写入新记录，不能删除它。
+    if _read_process_record(name) == record:
+        (RUN_DIR / f"{name}.pid").unlink(missing_ok=True)
+    print(f"  已停止 {label}（受管 PID {pid}）")
+    return True
 
 
 def stop_port(port, label, expect=()):
@@ -198,21 +259,7 @@ def stop_port(port, label, expect=()):
         if port_alive(port):
             print(f"{YELLOW}保留端口 {port} 上的未受管进程；无法证明属于本项目{RESET}")
         return False
-    pid = record["pid"]
-    try:
-        os.killpg(pid, signal.SIGTERM)
-        for _ in range(50):
-            if not _managed_record(name):
-                break
-            time.sleep(0.1)
-        # 强杀前重新校验，不能凭旧 PID 操作一个后来复用的进程。
-        if _managed_record(name):
-            os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    (RUN_DIR / f"{name}.pid").unlink(missing_ok=True)
-    print(f"  已停止 {label}（受管 PID {pid}）")
-    return True
+    return _stop_managed(name, record, label)
 
 
 def wait_for_port(port, timeout, label, proc=None, health=None):
@@ -267,9 +314,15 @@ def gateway_url(cfg):
 # 命令实现
 # --------------------------------------------------------------------------- #
 
-def cmd_start(cfg, open_panel=False, wait=True):
+def cmd_start(cfg, open_panel=False, wait=True, config_path=None):
+    config_path = selected_config_path(config_path)
     gw_port = int(cfg["gateway"]["port"])
     wh_port = int(cfg["whisper"]["port"])
+    for name, port in (("gateway", gw_port), ("whisper", wh_port)):
+        record = _managed_record(name)
+        if record and record["port"] != port:
+            print(f"{RED}✗ 受管 {name} 仍使用旧端口 {record['port']}；请先 stop 或 restart{RESET}")
+            return 1  # 不能用新 PID 记录覆盖旧进程，导致旧服务失去管理。
     legacy = _legacy_enabled(cfg)
     ds_port = _data_port(cfg) if legacy else 0
     ping = http_json(f"http://127.0.0.1:{gw_port}/ping")
@@ -308,6 +361,8 @@ def cmd_start(cfg, open_panel=False, wait=True):
             print(f"[2/2] 启动网关 :{gw_port} ...")
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            if config_path is not None:
+                env["JARVIS_CONFIG"] = str(config_path)
             gateway_proc, _ = spawn([str(VENV_PY), str(APP_DIR / "jarvis_gateway.py")],
                                      "jarvis_gateway.log", env=env)
             created.append(("gateway", gateway_proc))
@@ -343,14 +398,33 @@ def cmd_start(cfg, open_panel=False, wait=True):
             _rollback(created)
 
 
-def cmd_stop(cfg):
+def cmd_stop(cfg=None, config_path=None):
     print("正在停止本项目受管服务 ...")
-    for port, label in ((int(cfg["gateway"]["port"]), "网关"),
-                        (int(cfg["whisper"]["port"]), "识别服务")):
-        stop_port(port, label)
-    remaining = [p for p in (int(cfg["gateway"]["port"]), int(cfg["whisper"]["port"])) if port_alive(p)]
-    if remaining:
-        print(f"{YELLOW}仍有未受管/未退出监听者：{remaining}，未误报全部停止{RESET}")
+    # 配置只用于补充端口诊断，失效/移走/缺少鉴权变量不能阻止安全停服。
+    if cfg is None:
+        try:
+            cfg = load_config(config_path)
+        except (ValueError, OSError):
+            cfg = None
+    ports = set()
+    if cfg:
+        ports.update((int(cfg["gateway"]["port"]), int(cfg["whisper"]["port"])))
+    failed = False
+    for name, label in (("gateway", "网关"), ("whisper", "识别服务")):
+        raw = _read_process_record(name)
+        if raw:
+            ports.add(raw["port"])  # 包括改配置前的旧端口。
+        record = _managed_record(name)
+        if record:
+            failed |= not _stop_managed(name, record, label)
+        elif (RUN_DIR / f"{name}.pid").exists() and (
+            raw is None or pid_started(raw["pid"])
+        ):
+            print(f"{YELLOW}保留 {label} 的未确认进程记录；无法证明属于本项目{RESET}")
+            failed = True
+    remaining = sorted(p for p in ports if port_alive(p))
+    if remaining or failed:
+        print(f"{YELLOW}仍有未受管/未退出服务或监听者：{remaining}，未误报全部停止{RESET}")
         return 1
     print(f"{GREEN}✓ 受管服务已停止{RESET}")
     return 0
@@ -442,7 +516,7 @@ def cmd_logs(cfg, which, follow):
     os.execvp("tail", cmd)
 
 
-def cmd_autostart(cfg, action):
+def cmd_autostart(cfg, action, config_path=None):
     if action == "status":
         loaded = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
         present = LABEL in loaded.stdout
@@ -466,8 +540,9 @@ def cmd_autostart(cfg, action):
         return 0
 
     # launchd/Finder 不继承交互式 shell。不要把令牌复制进 plist。
-    if CONFIG_PATH.exists():
-        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    config_path = selected_config_path(config_path)
+    if config_path is not None:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
         token = raw.get("gateway", {}).get("auth_token", "")
         for name in re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", token):
             result = subprocess.run(["launchctl", "getenv", name], capture_output=True, text=True)
@@ -490,6 +565,8 @@ def cmd_autostart(cfg, action):
             "PYTHONUNBUFFERED": "1",
         },
     }
+    if config_path is not None:
+        payload["EnvironmentVariables"]["JARVIS_CONFIG"] = str(config_path)
 
     try:
         with open(PLIST_PATH, "wb") as f:
@@ -517,7 +594,7 @@ def cmd_autostart(cfg, action):
     return 0
 
 
-def cmd_doctor(cfg):
+def cmd_doctor(cfg, config_path=None):
     print("Jarvis 环境自检")
     print("-" * 58)
     ok = True
@@ -531,7 +608,8 @@ def cmd_doctor(cfg):
     check("Python venv", VENV_PY.exists(), str(VENV_PY))
     check("网关脚本", (APP_DIR / "jarvis_gateway.py").exists())
     check("控制台页面", (ROOT / "src" / "jarvis_gateway" / "web" / "dashboard.html").exists())
-    check("配置文件", CONFIG_PATH.exists(), str(CONFIG_PATH))
+    config_path = selected_config_path(config_path)
+    check("配置文件", config_path is not None, str(config_path or CONFIG_PATH))
     check("whisper-server", Path(os.path.expanduser(cfg["whisper"]["server_bin"])).exists(),
           cfg["whisper"]["server_bin"])
     check("Whisper 模型", Path(os.path.expanduser(cfg["whisper"]["model"])).exists(),
@@ -560,11 +638,12 @@ def cmd_doctor(cfg):
 # 入口
 # --------------------------------------------------------------------------- #
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="jarvis",
         description="Jarvis Gateway 启动器（ESP32 语音输入与 Mac 控制）",
     )
+    parser.add_argument("-c", "--config", metavar="PATH", help="指定配置文件（优先于 JARVIS_CONFIG）")
     sub = parser.add_subparsers(dest="command")
 
     p_start = sub.add_parser("start", help="启动全部服务")
@@ -588,9 +667,16 @@ def main():
     p_auto.add_argument("action", nargs="?", default="status",
                         choices=["on", "off", "status"])
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.command == "stop":
+        return cmd_stop(config_path=args.config)
+    if args.command == "autostart" and args.action in ("off", "status"):
+        return cmd_autostart(None, args.action)
+    if args.command == "logs":
+        return cmd_logs(None, args.which, args.follow)
     try:
-        cfg = load_config()
+        config_path = selected_config_path(args.config)
+        cfg = load_config(config_path)
     except (ValueError, OSError):
         print(f"{RED}✗ 配置无效或安全环境变量缺失；拒绝启动，请检查 config.json{RESET}")
         return 1
@@ -598,25 +684,22 @@ def main():
     if args.command in (None, "start"):
         return cmd_start(cfg,
                          open_panel=getattr(args, "open", False),
-                         wait=not getattr(args, "no_wait", False))
-    if args.command == "stop":
-        return cmd_stop(cfg)
+                         wait=not getattr(args, "no_wait", False),
+                         config_path=config_path)
     if args.command == "restart":
         if cmd_stop(cfg) != 0:
             return 1
         time.sleep(0.8)
-        return cmd_start(cfg, open_panel=args.open, wait=True)
+        return cmd_start(cfg, open_panel=args.open, wait=True, config_path=config_path)
     if args.command == "status":
         return cmd_status(cfg)
     if args.command == "open":
         open_dashboard(cfg)
         return 0
-    if args.command == "logs":
-        return cmd_logs(cfg, args.which, args.follow)
     if args.command == "autostart":
-        return cmd_autostart(cfg, args.action)
+        return cmd_autostart(cfg, args.action, config_path=config_path)
     if args.command == "doctor":
-        return cmd_doctor(cfg)
+        return cmd_doctor(cfg, config_path=config_path)
 
     parser.print_help()
     return 0

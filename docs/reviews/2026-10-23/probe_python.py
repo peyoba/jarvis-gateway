@@ -18,6 +18,7 @@ from unittest.mock import patch
 from jarvis_gateway.actions.injector import CursorInjector
 from jarvis_gateway.audio.converter import pcm_to_wav_bytes, wav_bytes_to_pcm16
 from jarvis_gateway.config import DEFAULT_CONFIG, ConfigError, load_config
+from jarvis_gateway.llm.client import ChatResult, LLMUsage, PolishResult
 from jarvis_gateway.server.server import GatewayHTTPServer, UnifiedGatewayServer
 from jarvis_gateway.services.token_service import TokenService
 
@@ -54,10 +55,11 @@ def fake_gateway():
 
     def polish(text):
         gateway.polish_calls.append(text)
-        return "模拟润色：" + text
+        return PolishResult("模拟润色：" + text, polished=True, usage=LLMUsage(calls=1, total_tokens=17))
 
     gateway.llm_manager = SimpleNamespace(
-        polish_text=polish, chat=lambda text: ("模拟回答", [])
+        polish_text_result=polish,
+        chat_result=lambda text: ChatResult("模拟回答", usage=LLMUsage(calls=1, total_tokens=17)),
     )
     httpd = GatewayHTTPServer(("127.0.0.1", 0), gateway.create_handler_class())
     gateway.port = httpd.server_port
@@ -174,9 +176,9 @@ def main():
             entered.set()
             if not release.wait(3):
                 raise TimeoutError("review synchronization timeout")
-            return text
+            return PolishResult(text, polished=True)
 
-        gateway.llm_manager.polish_text = delayed_polish
+        gateway.llm_manager.polish_text_result = delayed_polish
         with patch.object(CursorInjector, "inject_text",
                           side_effect=lambda text: injected.append(text) or True):
             worker = threading.Thread(target=lambda: first_results.append(
@@ -246,6 +248,7 @@ def main():
             "RUN_DIR": root / "run",
             "port_alive": lambda *a: False,
             "pid_started": lambda *a: "fake-start-time",
+            "selected_config_path": lambda *a: None,
         }
         with patch.dict(start.__globals__, {**isolated,
             "http_json": lambda *a: None,

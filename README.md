@@ -90,7 +90,9 @@ Clients must then send `Authorization: Bearer <token>` (or `X-Jarvis-Token: <tok
 
 Mode changes use `POST /mode?set=raw` or `POST /toggle-mode`. Legacy GET mutations return 405; update firmware that still uses them. Overlapping audio requests return 429 instead of typing results out of order. Browser recording stops at 60 seconds; decoded uploads are capped at 120 seconds / 8 MiB per request.
 
-> `Jarvis.app` and the launcher read the same `config.json`. After editing it, run `./jarvis restart`.
+> Configuration precedence is `--config PATH` > `JARVIS_CONFIG` > project `config.json` > standard locations. For example, use `./jarvis --config /path/to/config.json start`; the selected path is also passed to the gateway and LaunchAgent. `Jarvis.app` uses the same explicit/environment precedence. Finder/launchd environments must be configured separately—secrets are never copied into the plist.
+>
+> After editing configuration, restart when convenient. `./jarvis stop` can still stop identity-verified, launcher-managed processes if configuration is invalid or their ports changed; unknown processes are preserved and reported. Starting with changed ports cannot overwrite a still-running managed process record.
 
 ---
 
@@ -135,6 +137,10 @@ flowchart TD
 
 Fast system commands (volume, music, lock screen, weather…) only run in `dialog` mode or when the utterance starts with the wake word `贾维斯`. Typing modes (`auto`/`raw`/`polish`) never hijack your dictation, so "turn the volume to fifty" can be typed verbatim instead of changing the volume.
 
+Polishing skips texts of up to three characters. Missing/failed models safely fall back to raw typing; the console distinguishes AI-polished, short raw, and degraded raw results. `llm.total_timeout` (default 16 seconds) bounds the combined primary/fallback model operation and cancels its network I/O on expiry; ASR, typing and TTS have separate limits.
+
+System control is reported as successful only after a zero-exit execution. Model usage prefers provider-reported tokens; missing usage is explicitly estimated, and zero model calls add zero tokens. Failed/timed-out calls may have unknown additional charges. Local usage is gateway-session data, not a full-account bill.
+
 ---
 
 ## Hardware Companion Wire Protocol
@@ -151,6 +157,8 @@ Any IoT device capable of making HTTP POST requests can interface with Jarvis Ga
   | 16kHz 16-bit Mono PCM audio stream (max 120s; 100ms silence frame for typing)|
   +----------------------------------------------------------------+
   ```
+
+Response metadata also includes `kind`/`error`, `action_results` (success, error and return code), `polish` (requested/applied/reason), and `llm_usage` (calls, total_tokens, estimated, incomplete). These are additive fields; the length-prefixed JSON + 16 kHz PCM framing is unchanged.
 
 ---
 

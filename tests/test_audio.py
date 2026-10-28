@@ -2,6 +2,7 @@
 
 import array
 import os
+import struct
 import wave
 
 import pytest
@@ -57,3 +58,20 @@ def test_temporary_wav_file_treats_riff_prefixed_samples_as_pcm():
         with wave.open(wav_path, "rb") as wf:
             assert wf.getparams()[:4] == (1, 2, 16000, len(samples) // 2)
             assert wf.readframes(wf.getnframes()) == samples
+
+
+@pytest.mark.parametrize(("left", "right", "expected"), [
+    (0, 12000, 6000),
+    (12000, 0, 6000),
+    (32767, 32767, 32767),
+    (-32768, -32768, -32768),
+    (32767, -32768, -1),
+    (12000, -12000, 0),
+])
+@pytest.mark.parametrize("rate", [8000, 16000, 48000])
+def test_stereo_downmix_preserves_both_channels_without_overflow(left, right, expected, rate):
+    frames = rate // 10
+    wav = pcm_to_wav_bytes(struct.pack("<hh", left, right) * frames, sample_rate=rate, channels=2)
+    pcm = wav_bytes_to_pcm16(wav)
+    assert len(pcm) == 3200
+    assert set(struct.unpack("<1600h", pcm)) == {expected}

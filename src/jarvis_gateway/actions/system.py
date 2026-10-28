@@ -8,9 +8,26 @@ from __future__ import annotations
 import datetime
 import re
 import subprocess
+from dataclasses import dataclass
 from typing import Any, Optional
 
 SAFE_APP_PATTERN = re.compile(r"^[A-Za-z0-9 _\-]+$")
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    success: bool
+    error: str = ""
+    returncode: Optional[int] = None
+
+
+def action_failure_reply(result: ActionResult) -> str:
+    """只返回稳定的失败说明，不回显 subprocess 输出或模型动作参数。"""
+    if result.error == "action_timeout":
+        return "电脑控制超时，未确认执行成功，请检查系统状态后重试。"
+    if result.error == "invalid_action":
+        return "电脑控制未完成：动作或参数不受支持。"
+    return "电脑控制未完成，请检查 macOS 权限或目标应用后重试。"
 
 # Fast commands use *full-match* patterns on purpose. Substring matching (the old
 # "天气" in text check) hijacked normal dictation and typed nothing.
@@ -62,19 +79,22 @@ class SystemActionExecutor:
     """Executes macOS system control actions safely using structured subprocess calls."""
 
     @staticmethod
-    def _run_safe(cmd_args: list[str], timeout: float = 3.0) -> str:
+    def _run_safe(cmd_args: list[str], timeout: float = 3.0) -> ActionResult:
         try:
             p = subprocess.run(cmd_args, capture_output=True, text=True, timeout=timeout)
-            return p.stdout.strip()
+            return ActionResult(p.returncode == 0, "" if p.returncode == 0 else "action_failed", p.returncode)
+        except subprocess.TimeoutExpired:
+            print("[Action] 系统命令超时，未确认执行成功", flush=True)
+            return ActionResult(False, "action_timeout")
         except Exception as e:
             print(f"[Action] 执行系统命令异常 ({cmd_args[0] if cmd_args else 'unknown'}): {type(e).__name__}", flush=True)
-            return ""
+            return ActionResult(False, "action_unavailable")
 
     @classmethod
-    def execute_action(cls, action_str: str) -> None:
+    def execute_action(cls, action_str: str) -> ActionResult:
         """Execute a parsed action safely."""
         if not action_str:
-            return
+            return ActionResult(False, "invalid_action")
         action_str = action_str.strip()
         if action_str.startswith("set_volume:"):
             action_kind = "set_volume"
@@ -96,47 +116,49 @@ class SystemActionExecutor:
             val_part = action_str.split(":", 1)[1].strip()
             try:
                 vol = min(100, max(0, int(val_part)))
-                cls._run_safe(["osascript", "-e", f"set volume output volume {vol}"])
+                return cls._run_safe(["osascript", "-e", f"set volume output volume {vol}"])
             except ValueError:
-                pass
+                return ActionResult(False, "invalid_action")
         elif action_str == "volume_up":
-            cls._run_safe([
+            return cls._run_safe([
                 "osascript", "-e",
                 "set volume output volume ((output volume of (get volume settings)) + 12)"
             ])
         elif action_str == "volume_down":
-            cls._run_safe([
+            return cls._run_safe([
                 "osascript", "-e",
                 "set volume output volume ((output volume of (get volume settings)) - 12)"
             ])
         elif action_str == "mute":
-            cls._run_safe(["osascript", "-e", "set volume output muted true"])
+            return cls._run_safe(["osascript", "-e", "set volume output muted true"])
         elif action_str == "unmute":
-            cls._run_safe(["osascript", "-e", "set volume output muted false"])
+            return cls._run_safe(["osascript", "-e", "set volume output muted false"])
 
         # 2. Apple Music control
         elif action_str == "music_play":
-            cls._run_safe(["osascript", "-e", 'tell application "Music" to play'])
+            return cls._run_safe(["osascript", "-e", 'tell application "Music" to play'])
         elif action_str == "music_pause":
-            cls._run_safe(["osascript", "-e", 'tell application "Music" to pause'])
+            return cls._run_safe(["osascript", "-e", 'tell application "Music" to pause'])
         elif action_str == "music_next":
-            cls._run_safe(["osascript", "-e", 'tell application "Music" to next track'])
+            return cls._run_safe(["osascript", "-e", 'tell application "Music" to next track'])
 
         # 3. Application opening (Strict regex check to prevent command injection)
         elif action_str.startswith("open_app:"):
             app = action_str.split(":", 1)[1].strip()
-            if SAFE_APP_PATTERN.match(app):
-                cls._run_safe(["open", "-a", app])
+            if SAFE_APP_PATTERN.fullmatch(app):
+                return cls._run_safe(["open", "-a", app])
             else:
                 print("[!] 拒绝执行非法应用名称", flush=True)
+                return ActionResult(False, "invalid_action")
 
         # 4. Lock screen
         elif action_str == "lock_screen":
             # Ctrl+Cmd+Q works on every supported macOS version (CGSession was removed).
-            cls._run_safe([
+            return cls._run_safe([
                 "osascript", "-e",
                 'tell application "System Events" to keystroke "q" using {control down, command down}'
             ])
+        return ActionResult(False, "invalid_action")
 
     @classmethod
     def plan_fast_command(
@@ -215,5 +237,9 @@ class SystemActionExecutor:
             return None
         reply, action = plan
         if execute and action:
-            cls.execute_action(action)
+            result = cls.execute_action(action)
+            if not isinstance(result, ActionResult):
+                result = ActionResult(False, "action_failed")
+            if not result.success:
+                return action_failure_reply(result)
         return reply

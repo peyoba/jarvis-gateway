@@ -80,6 +80,7 @@
   .row .e{color:var(--faint);text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
   .row.miss .m{color:var(--warn);background:rgba(251,191,36,.1);border-color:rgba(251,191,36,.25)}
   .row.error .m{color:var(--bad);background:rgba(248,113,113,.1);border-color:rgba(248,113,113,.25)}
+  .row.degraded .m{color:var(--warn);background:rgba(251,191,36,.1);border-color:rgba(251,191,36,.25)}
   .empty{padding:26px 10px;text-align:center;color:var(--faint);font-size:13px}
   footer{margin-top:24px;color:var(--faint);font-size:12px;line-height:1.9}
   code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#0b1425;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#cbd5e1}
@@ -211,6 +212,13 @@
     el.textContent = text;
     return el;
   }
+  function turnLabel(r){
+    if (r.typed && r.polish && r.polish.requested){
+      if (r.polish.applied) return "AI润色";
+      return r.polish.reason === "short_text" ? "短句原字" : "原字降级";
+    }
+    return MODE_LABEL[r.mode] || r.mode || "-";
+  }
 
   function render(d){
     var gw = d.gateway || {}, asr = d.whisper || {}, data = d.data || {};
@@ -255,10 +263,12 @@
         var r = list[j];
         var row = document.createElement("div");
         row.className = "row" + (r.kind === "miss" ? " miss" : (r.kind === "error" ? " error" : ""));
+        if (r.kind !== "error" && r.polish && r.polish.requested &&
+            !r.polish.applied && r.polish.reason !== "short_text") row.className += " degraded";
 
         var time = new Date((r.ts || 0) * 1000);
         row.appendChild(rowCell("t", time.toLocaleTimeString("zh-CN", { hour12:false })));
-        row.appendChild(rowCell("m", MODE_LABEL[r.mode] || r.mode || "-"));
+        row.appendChild(rowCell("m", turnLabel(r)));
         row.appendChild(rowCell("h", r.heard || "…"));
         row.appendChild(rowCell("r", r.typed ? "⌨ " + r.typed : (r.reply || "…")));
         row.appendChild(rowCell("e", (r.elapsed || 0).toFixed(2) + "s"));
@@ -462,6 +472,8 @@
       var meta = JSON.parse(new TextDecoder().decode(new Uint8Array(payload, 4, metaLength)));
       if (meta.kind === "error") micStatus.textContent = "处理失败：" + (meta.reply || meta.error);
       else if (meta.kind === "miss") micStatus.textContent = meta.reply || "没有听清，请重试。";
+      else if (meta.typed && meta.polish && meta.polish.requested)
+        micStatus.textContent = meta.reply || (turnLabel(meta) + "，已键入：" + meta.typed);
       else micStatus.textContent = meta.typed ? "已键入：" + meta.typed : (meta.reply || "已完成");
       // 消费 PCM 问答音频；浏览器若限制自动播放，保留明确的文字回复。
       var pcmOffset = 4 + metaLength;

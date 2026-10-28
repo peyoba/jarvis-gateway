@@ -83,7 +83,10 @@ def wav_bytes_to_pcm16(data: bytes, sample_rate: int = 16000) -> bytes:
     if sys.byteorder != "little":
         samples.byteswap()
     if channels > 1:
-        samples = array.array("h", samples[::channels])
+        # 使用 Python 整数求均值，避免 int16 相加溢出；两侧任一声道的语音都保留。
+        samples = array.array("h", (
+            (samples[i] + samples[i + 1]) // 2 for i in range(0, len(samples), 2)
+        ))
     if rate != sample_rate and rate > 0 and len(samples) > 1:
         ratio = sample_rate / float(rate)
         n_out = max(1, int(len(samples) * ratio))

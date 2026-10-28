@@ -17,7 +17,7 @@ const deferred = () => {
 function context(options = {}) {
   const elements = {}, events = {}, permissions = [], tracks = [], contexts = [], uploads = [];
   const timers = new Map();
-  let timerID = 0;
+  let timerID = 0, nodeID = 0;
   function element(id) {
     if (elements[id]) return elements[id];
     const values = new Set();
@@ -60,7 +60,8 @@ function context(options = {}) {
   }
   const sandbox = {
     document: {
-      getElementById: element, querySelectorAll: () => [], createElement: element,
+      getElementById: element, querySelectorAll: () => [],
+      createElement: () => element("created-node-" + (++nodeID)),
       hidden: false, addEventListener: (name, cb) => { events["document:" + name] = cb; },
     },
     localStorage: { getItem: () => "", setItem() {}, removeItem() {} },
@@ -78,7 +79,7 @@ function context(options = {}) {
     } } },
     fetch: async (url, opts) => {
       if (!url.startsWith("/chat")) {
-        return { ok: true, status: 200, json: async () => ({}) };
+        return { ok: true, status: 200, json: async () => options.status || ({}) };
       }
       uploads.push(opts);
       if (options.pendingUpload) await options.pendingUpload.promise;
@@ -201,6 +202,36 @@ async function main() {
   await c.release();
   assert.match(c.elements["mic-status"].textContent, /处理失败.*键入失败/);
   results.push({ probe: "binary_failure_metadata_is_shown", passed: true });
+
+  c = context({ meta: {
+    typed: "原文", reply: "[润色不可用，已原字键入] 原文", mode: "polish", kind: "ok",
+    speak: false, polish: { requested: true, applied: false, reason: "llm_unconfigured" },
+  } });
+  start = c.start();
+  c.permissions[0].grant();
+  await start;
+  c.samples();
+  await c.release();
+  assert.match(c.elements["mic-status"].textContent, /润色不可用.*已原字键入/);
+  assert.doesNotMatch(c.elements["mic-status"].textContent, /已AI润色/);
+  results.push({ probe: "polish_fallback_is_not_labelled_as_ai_success", passed: true });
+
+  c = context({ status: {
+    gateway: { mode: "polish" },
+    recent: [
+      { mode: "polish", typed: "成功", polish: { requested: true, applied: true }, kind: "ok" },
+      { mode: "polish", typed: "降级", polish: { requested: true, applied: false, reason: "llm_timeout" }, kind: "ok" },
+      { mode: "polish", typed: "短句", polish: { requested: true, applied: false, reason: "short_text" }, kind: "ok" },
+    ],
+  } });
+  await tick();
+  const rows = c.elements.recent.children;
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map(row => row.children[1].textContent), ["AI润色", "原字降级", "短句原字"]);
+  assert.match(rows[1].className, /degraded/);
+  assert.doesNotMatch(rows[0].className, /degraded/);
+  assert.doesNotMatch(rows[2].className, /degraded/);
+  results.push({ probe: "recent_rows_show_actual_polish_outcome", passed: true });
 
   c = context({ meta: { typed: "", reply: "模拟问答", mode: "raw", kind: "ok", speak: true } });
   start = c.start();

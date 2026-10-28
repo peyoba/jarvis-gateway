@@ -1,6 +1,6 @@
 """Actions subpackage."""
 
 from jarvis_gateway.actions.injector import CursorInjector
-from jarvis_gateway.actions.system import SystemActionExecutor
+from jarvis_gateway.actions.system import ActionResult, SystemActionExecutor
 
-__all__ = ["SystemActionExecutor", "CursorInjector"]
+__all__ = ["ActionResult", "SystemActionExecutor", "CursorInjector"]

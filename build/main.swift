@@ -40,24 +40,59 @@ final class Box {
     var text = ""
 }
 
+struct ConfigSelection {
+    let url: URL
+    let required: Bool
+}
+
+/// 与启动器一致：显式路径 > 环境变量 > 工程配置 > 用户标准位置。
+func resolveConfig(root: URL, arguments: [String] = CommandLine.arguments,
+                   environment: [String: String] = ProcessInfo.processInfo.environment) -> ConfigSelection {
+    for flag in ["--config", "-c"] {
+        if let index = arguments.firstIndex(of: flag), index + 1 < arguments.count {
+            let path = (arguments[index + 1] as NSString).expandingTildeInPath
+            return ConfigSelection(url: URL(fileURLWithPath: path).standardizedFileURL, required: true)
+        }
+    }
+    if let path = environment["JARVIS_CONFIG"], !path.isEmpty {
+        return ConfigSelection(
+            url: URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL,
+            required: true
+        )
+    }
+    let project = root.appendingPathComponent("config.json")
+    if fm.fileExists(atPath: project.path) {
+        return ConfigSelection(url: project, required: true)
+    }
+    let user = fm.homeDirectoryForCurrentUser.appendingPathComponent(".config/jarvis-gateway/config.json")
+    if fm.fileExists(atPath: user.path) {
+        return ConfigSelection(url: user, required: true)
+    }
+    return ConfigSelection(url: project, required: false)
+}
+
 /// 菜单轮询与 --selftest 共用配置解析，避免自检通过而真实菜单访问旧端口。
 struct GatewayConnection {
     let port: Int
     let token: String
+    let valid: Bool
 
-    init(configURL: URL, environment: [String: String] = ProcessInfo.processInfo.environment) {
-        let data = (try? Data(contentsOf: configURL)) ?? Data()
-        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    init(selection: ConfigSelection, environment: [String: String] = ProcessInfo.processInfo.environment) {
+        let data = try? Data(contentsOf: selection.url)
+        let object = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         let gateway = object?["gateway"] as? [String: Any]
         port = (gateway?["port"] as? Int) ?? 18888
+        let configValid = (object != nil || (!selection.required && data == nil)) && (1...65535).contains(port)
         let raw = gateway?["auth_token"] as? String ?? ""
         if let override = environment["JARVIS_AUTH_TOKEN"], !override.isEmpty {
             token = override
+            valid = configValid
             return
         }
         let pattern = #"\$\{([A-Za-z_][A-Za-z0-9_]*)\}"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             token = ""
+            valid = false
             return
         }
         var result = raw
@@ -66,15 +101,17 @@ struct GatewayConnection {
                   let value = environment[String(raw[range])], !value.isEmpty,
                   let whole = Range(match.range(at: 0), in: raw) else {
                 token = ""
+                valid = false
                 return
             }
             result.replaceSubrange(whole, with: value)
         }
         token = result
+        valid = configValid
     }
 
     func url(_ path: String) -> URL? {
-        URL(string: "http://127.0.0.1:\(port)\(path)")
+        valid ? URL(string: "http://127.0.0.1:\(port)\(path)") : nil
     }
 
     func request(_ path: String) -> URLRequest? {
@@ -109,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let defaults = UserDefaults.standard
 
     var connection: GatewayConnection {
-        GatewayConnection(configURL: root.appendingPathComponent("config.json"))
+        GatewayConnection(selection: resolveConfig(root: root))
     }
 
     func gatewayURL(path: String) -> URL? {
@@ -365,7 +402,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let process = Process()
         process.executableURL = python
-        process.arguments = [script.path] + arguments
+        let selection = resolveConfig(root: root)
+        let configArguments = selection.required ? ["--config", selection.url.path] : []
+        process.arguments = [script.path] + configArguments + arguments
+        if selection.required {
+            var environment = ProcessInfo.processInfo.environment
+            environment["JARVIS_CONFIG"] = selection.url.path
+            process.environment = environment
+        }
         process.currentDirectoryURL = root
 
         let pipe = Pipe()
@@ -421,12 +465,7 @@ if CommandLine.arguments.contains("--selftest") {
 
     let box = Box()
     let semaphore = DispatchSemaphore(value: 0)
-    var configURL = root.appendingPathComponent("config.json")
-    if let index = CommandLine.arguments.firstIndex(of: "--config"),
-       index + 1 < CommandLine.arguments.count {
-        configURL = URL(fileURLWithPath: CommandLine.arguments[index + 1])
-    }
-    let connection = GatewayConnection(configURL: configURL)
+    let connection = GatewayConnection(selection: resolveConfig(root: root))
     print("gateway_port=\(connection.port)")
     guard let request = connection.request("/status?summary=1") else {
         print("status=invalid_url")

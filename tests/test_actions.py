@@ -2,7 +2,12 @@
 
 import pytest
 
-from jarvis_gateway.actions.system import SAFE_APP_PATTERN, SystemActionExecutor, strip_wake_word
+from jarvis_gateway.actions.system import (
+    SAFE_APP_PATTERN,
+    ActionResult,
+    SystemActionExecutor,
+    strip_wake_word,
+)
 
 
 def test_safe_app_pattern():
@@ -72,7 +77,54 @@ def test_action_execution_preserves_commands_without_logging_arguments(
     monkeypatch, capsys, action, kind, command
 ):
     calls = []
-    monkeypatch.setattr(SystemActionExecutor, "_run_safe", lambda args: calls.append(args))
-    SystemActionExecutor.execute_action(action)
+    monkeypatch.setattr(SystemActionExecutor, "_run_safe", lambda args: calls.append(args) or ActionResult(True))
+    assert SystemActionExecutor.execute_action(action).success
     assert calls == [command]
     assert capsys.readouterr().out.strip() == f"[*] 执行 Mac 动作: {kind}"
+
+
+@pytest.mark.parametrize("returncode", [0, 1, 127])
+def test_action_returncode_is_not_discarded(monkeypatch, capsys, returncode):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr("jarvis_gateway.actions.system.subprocess.run",
+                        Mock(return_value=Mock(returncode=returncode, stdout="private-output", stderr="private-error")))
+    result = SystemActionExecutor.execute_action("lock_screen")
+    assert result.success == (returncode == 0)
+    assert result.returncode == returncode
+    assert result.error == ("" if returncode == 0 else "action_failed")
+    assert "private" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("action", "error"), [
+    ("set_volume:invalid", "invalid_action"),
+    ("open_app:Safari;echo private", "invalid_action"),
+    ("unknown-private-action", "invalid_action"),
+    ("", "invalid_action"),
+])
+def test_invalid_actions_fail_without_running_any_command(monkeypatch, action, error):
+    from unittest.mock import Mock
+
+    run = Mock()
+    monkeypatch.setattr("jarvis_gateway.actions.system.subprocess.run", run)
+    assert SystemActionExecutor.execute_action(action) == ActionResult(False, error)
+    run.assert_not_called()
+
+
+def test_action_timeout_is_reported_and_fast_reply_does_not_claim_success(monkeypatch, capsys):
+    import subprocess
+    from unittest.mock import Mock
+
+    run = Mock(side_effect=subprocess.TimeoutExpired("synthetic-private-command", 3, output="private"))
+    monkeypatch.setattr("jarvis_gateway.actions.system.subprocess.run", run)
+    assert SystemActionExecutor.execute_action("lock_screen") == ActionResult(False, "action_timeout")
+    reply = SystemActionExecutor.match_fast_command("锁屏")
+    assert "超时" in reply and "已为您锁定" not in reply
+    assert "private" not in capsys.readouterr().out
+
+
+def test_missing_action_binary_is_a_failure(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr("jarvis_gateway.actions.system.subprocess.run", Mock(side_effect=FileNotFoundError))
+    assert SystemActionExecutor.execute_action("mute") == ActionResult(False, "action_unavailable")

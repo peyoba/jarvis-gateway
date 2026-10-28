@@ -1,26 +1,69 @@
 """Security and protocol hardening tests (no audio is ever injected)."""
 
+import asyncio
 import copy
 import http.client
 import io
 import json
 import socket
 import struct
+import subprocess
 import threading
 import time
 import wave
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from jarvis_gateway.actions.injector import CursorInjector
-from jarvis_gateway.actions.system import SystemActionExecutor
+from jarvis_gateway.actions.system import ActionResult, SystemActionExecutor
 from jarvis_gateway.asr.manager import is_hallucination
 from jarvis_gateway.audio.converter import pcm_to_wav_bytes, wav_bytes_to_pcm16
 from jarvis_gateway.config import DEFAULT_CONFIG
+from jarvis_gateway.llm.client import ChatResult, LLMClientManager, LLMUsage, PolishResult
 from jarvis_gateway.server.server import UnifiedGatewayServer
 
 TOKEN = "secret123"
+
+
+class _AsyncClient:
+    """每次请求创建的异步替身，显式检查取消和资源关闭。"""
+
+    def __init__(self, text="模拟回答", delay=0, tokens=17):
+        self.text, self.delay, self.tokens = text, delay, tokens
+        self.closed = False
+        self.cancelled = False
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        self.closed = True
+
+    async def create(self, **kwargs):
+        try:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=self.text))],
+                usage=SimpleNamespace(total_tokens=self.tokens),
+            )
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+def _llm_with_client_factory(factory, timeout=1):
+    return LLMClientManager({
+        "total_timeout": timeout,
+        "primary": {
+            "api_key": "synthetic-test-only", "base_url": "https://test.invalid/v1",
+            "model": "test-model", "timeout": timeout,
+        },
+        "fallback": {},
+    }, client_factory=factory)
 
 
 def free_port():
@@ -220,14 +263,16 @@ def test_audio_intent_contracts(gateway, monkeypatch, mode, heard, seconds, type
     calls = {"polish": [], "chat": [], "injected": [], "actions": []}
     monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: (heard, 0, "fake"))
     monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
-    monkeypatch.setattr(gateway.llm_manager, "polish_text",
-                        lambda text: calls["polish"].append(text) or "润色结果")
-    monkeypatch.setattr(gateway.llm_manager, "chat",
-                        lambda text: (calls["chat"].append(text) or "模拟回答", []))
+    monkeypatch.setattr(gateway.llm_manager, "polish_text_result",
+                        lambda text: calls["polish"].append(text) or PolishResult(
+                            "润色结果", polished=True, usage=LLMUsage(calls=1, total_tokens=17)))
+    monkeypatch.setattr(gateway.llm_manager, "chat_result",
+                        lambda text: calls["chat"].append(text) or ChatResult(
+                            "模拟回答", usage=LLMUsage(calls=1, total_tokens=17)))
     monkeypatch.setattr(CursorInjector, "inject_text",
                         lambda text: calls["injected"].append(text) or True)
     monkeypatch.setattr(SystemActionExecutor, "execute_action",
-                        lambda action: calls["actions"].append(action))
+                        lambda action: calls["actions"].append(action) or ActionResult(True))
     status, body = request("POST", f"/chat?mode={mode}", bytes(seconds * 32000),
                            {"X-Jarvis-Token": TOKEN})
     meta = _wire_meta(body)
@@ -301,22 +346,155 @@ def test_unknown_model_actions_do_not_log_private_body(gateway, monkeypatch, cap
     private = "synthetic-private-transcript"
     monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: ("解释问题", 0, "fake"))
     monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
-    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
-        content=f"模拟回答[ACTION:{private}][ACTION:{private}:value]"
-    ))])
-    completions = SimpleNamespace(create=lambda **kwargs: response)
-    monkeypatch.setattr(gateway.llm_manager, "primary_client",
-                        SimpleNamespace(chat=SimpleNamespace(completions=completions)))
-    monkeypatch.setattr(gateway.llm_manager, "primary_cfg", {"model": "test-model"})
+    manager = _llm_with_client_factory(
+        lambda **kwargs: _AsyncClient(f"模拟回答[ACTION:{private}][ACTION:{private}:value]")
+    )
+    monkeypatch.setattr(gateway, "llm_manager", manager)
     executed = []
     monkeypatch.setattr(SystemActionExecutor, "_run_safe", lambda args: executed.append(args))
     status, body = request("POST", "/chat?mode=dialog", bytes(32000), {"X-Jarvis-Token": TOKEN})
     assert status == 200
-    assert _wire_meta(body)["kind"] == "ok"
+    assert _wire_meta(body)["kind"] == "error"
+    assert _wire_meta(body)["error"] == "invalid_action"
     assert executed == []
     output = capsys.readouterr().out
     assert private not in output
     assert "unknown" in output
+
+
+@pytest.mark.parametrize("source", ["fast", "llm"])
+@pytest.mark.parametrize(("failure", "error", "returncode"), [
+    ("nonzero", "action_failed", 1),
+    ("timeout", "action_timeout", None),
+    ("missing", "action_unavailable", None),
+])
+def test_failed_system_actions_reach_wire_and_recent_status(
+    gateway, monkeypatch, source, failure, error, returncode
+):
+    heard = "锁屏" if source == "fast" else "帮我执行锁屏操作"
+    monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: (heard, 0, "fake"))
+    monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
+    monkeypatch.setattr(gateway.llm_manager, "chat_result", lambda text: ChatResult(
+        "已为您锁定屏幕。", ("lock_screen",), usage=LLMUsage(calls=1, total_tokens=17),
+    ))
+    run = Mock(return_value=SimpleNamespace(returncode=1, stdout="private-output", stderr="private-error"))
+    if failure == "timeout":
+        run.side_effect = subprocess.TimeoutExpired("synthetic-command", 3, stderr="private-error")
+    elif failure == "missing":
+        run.side_effect = FileNotFoundError
+    monkeypatch.setattr("jarvis_gateway.actions.system.subprocess.run", run)
+    status, body = request("POST", "/chat?mode=dialog", bytes(32000), {"X-Jarvis-Token": TOKEN})
+    meta = _wire_meta(body)
+    assert status == 200 and meta["kind"] == "error"
+    assert meta["error"] == error and "已为您锁定" not in meta["reply"]
+    assert "private" not in meta["reply"]
+    assert meta["action_results"] == [{"success": False, "error": error, "returncode": returncode}]
+    recent = gateway.state._recent_turns[0]
+    assert recent["kind"] == "error" and recent["error"] == error
+    assert recent["action_results"] == meta["action_results"]
+
+
+def test_missing_action_result_is_not_treated_as_success(gateway, monkeypatch):
+    monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: ("锁屏", 0, "fake"))
+    monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
+    monkeypatch.setattr(SystemActionExecutor, "execute_action", lambda action: None)
+    _, body = request("POST", "/chat?mode=dialog", bytes(32000), {"X-Jarvis-Token": TOKEN})
+    assert _wire_meta(body)["error"] == "action_failed"
+    assert _wire_meta(body)["kind"] == "error"
+
+
+def test_multi_action_failure_stops_remaining_actions_and_success_claim(gateway, monkeypatch):
+    monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: ("执行电脑控制操作", 0, "fake"))
+    monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
+    monkeypatch.setattr(gateway.llm_manager, "chat_result", lambda text: ChatResult(
+        "已全部执行成功。", ("volume_up", "music_play", "lock_screen"),
+    ))
+    execute = Mock(side_effect=[ActionResult(True, returncode=0), ActionResult(False, "action_failed", 1)])
+    monkeypatch.setattr(SystemActionExecutor, "execute_action", execute)
+    _, body = request("POST", "/chat?mode=dialog", bytes(32000), {"X-Jarvis-Token": TOKEN})
+    meta = _wire_meta(body)
+    assert meta["kind"] == "error" and meta["error"] == "action_failed"
+    assert "已全部" not in meta["reply"]
+    assert execute.call_count == 2
+    assert len(meta["action_results"]) == 2 and not meta["action_results"][1]["success"]
+
+
+@pytest.mark.parametrize(("heard", "reason"), [
+    ("这段原文应该被保留", "llm_unconfigured"),
+    ("工作中", "short_text"),
+])
+def test_polish_fallback_metadata_is_truthful_and_zero_calls_cost_zero(
+    gateway, monkeypatch, heard, reason
+):
+    monkeypatch.setattr(gateway, "llm_manager", LLMClientManager({"primary": {}, "fallback": {}}))
+    monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: (heard, 0, "fake"))
+    monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
+    monkeypatch.setattr(CursorInjector, "inject_text", lambda text: True)
+    before = gateway.token_service.get_snapshot()["total"]
+    status, body = request("POST", "/chat?mode=polish", bytes(32000), {"X-Jarvis-Token": TOKEN})
+    meta = _wire_meta(body)
+    assert status == 200 and meta["kind"] == "ok" and meta["typed"] == heard
+    assert meta["polish"] == {"requested": True, "applied": False, "reason": reason, "channel": ""}
+    assert "已AI润色" not in meta["reply"] and "原字" in meta["reply"]
+    assert meta["llm_usage"] == {"calls": 0, "total_tokens": 0, "estimated": False, "incomplete": False}
+    assert gateway.token_service.get_snapshot()["total"] == before
+    _, data = request("GET", "/status", headers={"X-Jarvis-Token": TOKEN})
+    recent = json.loads(data)["recent"][0]
+    assert recent["polish"] == meta["polish"] and recent["llm_usage"] == meta["llm_usage"]
+
+
+def test_successful_polish_records_provider_usage_not_output_length(gateway, monkeypatch):
+    clients = []
+
+    def factory(**kwargs):
+        client = _AsyncClient("润色结果")
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(gateway, "llm_manager", _llm_with_client_factory(factory))
+    monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: ("需要润色的原文", 0, "fake"))
+    monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
+    monkeypatch.setattr(CursorInjector, "inject_text", lambda text: True)
+    before = gateway.token_service.get_snapshot()["total"]
+    _, body = request("POST", "/chat?mode=polish", bytes(32000), {"X-Jarvis-Token": TOKEN})
+    meta = _wire_meta(body)
+    assert meta["polish"]["applied"] and meta["reply"].startswith("[已AI润色]")
+    assert meta["llm_usage"] == {"calls": 1, "total_tokens": 17, "estimated": False, "incomplete": False}
+    assert gateway.token_service.get_snapshot()["total"] == before + 17
+    assert clients[0].closed
+
+
+@pytest.mark.parametrize("mode", ["polish", "dialog"])
+def test_cancelled_llm_request_releases_turn_slot_and_can_repeat(gateway, monkeypatch, mode):
+    clients = []
+
+    def factory(**kwargs):
+        client = _AsyncClient("不应迟到执行的模型回复[ACTION:lock_screen]", delay=1)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(gateway, "llm_manager", _llm_with_client_factory(factory, timeout=0.04))
+    monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: ("需要处理的原文内容", 0, "fake"))
+    monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
+    inject, execute = Mock(return_value=True), Mock()
+    monkeypatch.setattr(CursorInjector, "inject_text", inject)
+    monkeypatch.setattr(SystemActionExecutor, "execute_action", execute)
+    for _ in range(3):
+        status, body = request("POST", f"/chat?mode={mode}", bytes(32000), {"X-Jarvis-Token": TOKEN})
+        meta = _wire_meta(body)
+        assert status == 200
+        if mode == "polish":
+            assert meta["kind"] == "ok" and meta["polish"]["reason"] == "llm_timeout"
+            assert "已AI润色" not in meta["reply"]
+        else:
+            assert meta["kind"] == "error" and meta["error"] == "llm_timeout"
+        assert meta["llm_usage"]["calls"] == 1 and meta["llm_usage"]["incomplete"]
+        assert clients[-1].closed and clients[-1].cancelled
+    execute.assert_not_called()
+    # 后续原字请求不再被旧请求占用槽位，也不再发起模型调用。
+    status, body = request("POST", "/chat?mode=raw", bytes(32000), {"X-Jarvis-Token": TOKEN})
+    assert status == 200 and _wire_meta(body)["typed"] == "需要处理的原文内容"
+    assert _wire_meta(body)["llm_usage"]["calls"] == 0 and len(clients) == 3
 
 
 def test_invalid_mode_is_rejected(gateway):

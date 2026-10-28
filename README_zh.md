@@ -90,6 +90,10 @@ export JARVIS_AUTH_TOKEN="$(openssl rand -hex 24)"
 
 模式切换使用 POST；旧 GET 写接口返回 405，仍使用旧接口的固件需要同步修改。并行音频请求返回 429，不再乱序上屏。网页单次录音最多 60 秒，上传请求体最多 8 MiB、解码后最多 120 秒。
 
+配置优先级为 `--config PATH` > `JARVIS_CONFIG` > 工程 `config.json` > 标准位置，例如 `./jarvis --config /path/to/config.json start`。选定路径会传给网关子进程和 LaunchAgent，菜单栏 App 也遵循显式路径/环境变量优先级；Finder/launchd 环境需单独配置，密钥不会复制到 plist。
+
+配置失效或端口改动后，`./jarvis stop` 仍可按身份校验停止本启动器记录的受管进程；无法确认身份的进程会保留并报告。旧端口服务尚在运行时，直接 `start` 不会覆盖旧 PID 记录，请按需使用 `restart`。
+
 ---
 
 ## 架构总览
@@ -158,6 +162,10 @@ jarvis-gateway/
 
 系统快捷指令（音量、音乐、锁屏、天气等）只在 `dialog` 模式或句首带唤醒词「贾维斯」时执行。打字模式不会劫持口述内容，例如「把音量调到五十」会原样上屏，而不是真的改音量。
 
+三字及以内短句跳过模型；未配置模型、调用失败或超时时安全回退原字，并明确区分「AI 润色」「短句原字」「原字降级」。`llm.total_timeout`（默认 16 秒）约束主/备模型调用合计耗时，到期取消真实网络 I/O；ASR、键入和 TTS 使用各自的时限。
+
+电脑控制只有在命令以 0 退出后才报告成功；失败会反映到回复和最近记录。Token 优先采用供应商返回的用量，缺少用量时明确标为估算，零模型调用不增加 Token。失败/超时请求的额外账单可能未知；本地统计仅代表网关会话，不是全账户账单。
+
 ---
 
 ## 硬件接入协议
@@ -183,6 +191,8 @@ jarvis-gateway/
 - `POST /mode?set=auto|raw|polish|dialog`：切换模式（也接受 JSON `{"mode": "..."}`）；GET 仅用于查询
 - `POST /toggle-mode`：轮换模式
 - `GET /token-stats`、`GET /weather`：Token 与天气数据（默认合并到 `18888`）
+
+语音响应元数据新增 `kind`/`error`、`action_results`（成功状态、错误、退出码）、`polish`（请求/实际润色/原因）与 `llm_usage`（调用数、Token、估算/未知用量标记）。这些字段可按需读取，原有「长度前缀 JSON + 16 kHz PCM」协议保持兼容。
 
 ---
 
