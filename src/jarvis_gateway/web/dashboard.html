@@ -338,12 +338,18 @@
       $("board-last").textContent = "—";
     } else {
       var tail = last.ok ? "成功" : "失败";
-      $("board-last").textContent = tail + " " + last.at + (last.port ? " · " + last.port : "");
-      $("board-last").title = last.detail || "";
+      $("board-last").textContent = tail + " " + last.at;
+      $("board-last").title = (last.detail || "") + (last.port ? "（" + last.port + "）" : "");
     }
     $("board-sync").disabled = !!b.busy;
     $("board-set").disabled = !!b.busy;
-    if (b.busy) $("board-status").textContent = "正在写串口，板子重启约 7 秒…";
+    if (b.busy){
+      $("board-status").textContent = "正在写串口，板子重启约 7 秒…";
+    } else if ($("board-status").textContent.indexOf("正在写串口") === 0){
+      $("board-status").textContent = last.ok
+        ? "已写入 " + (last.host || "") + "，板子正在重新联网"
+        : "上次写入失败，点一次重试";
+    }
   }
 
   async function refreshBoard(){
