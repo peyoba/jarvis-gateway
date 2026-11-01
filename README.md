@@ -104,7 +104,7 @@ The firmware stores the gateway address in NVS (`hatch.host`); when your Mac's L
 ./jarvis ip-guard start           # optional: background daemon that rewrites on change
 ```
 
-Requires `pyserial` (`venv/bin/pip install pyserial`, or `pip install 'jarvis-gateway[serial]'`). Opening the serial port resets the board for a few seconds, so a write only happens when the address actually changed; see [the sync guide (Chinese)](docs/开发板网关地址自动同步.md) for details.
+The 开发板地址 panel on the dashboard exposes the same two actions (**同步到开发板** skips the serial write when the address already matches, **写入指定地址** takes a typed address), so any phone or laptop on the same Wi-Fi can fix the board. Requires `pyserial` (`venv/bin/pip install pyserial`, or `pip install 'jarvis-gateway[serial]'`). Opening the serial port resets the board for a few seconds, so a write only happens when the address actually changed; see [the sync guide (Chinese)](docs/开发板网关地址自动同步.md) for details.
 
 ---
 

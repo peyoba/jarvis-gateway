@@ -104,7 +104,7 @@ export JARVIS_AUTH_TOKEN="$(openssl rand -hex 24)"
 ./jarvis ip-guard start           # 可选：后台守护，地址一变就自动重写
 ```
 
-需要 `pyserial`（`venv/bin/pip install pyserial`，或 `pip install 'jarvis-gateway[serial]'`）。打开串口会让开发板复位数秒，因此只在地址确实变化时才写入；机制与排错见 [开发板网关地址自动同步](docs/开发板网关地址自动同步.md)。
+控制台首页的「开发板地址」面板有同样两个按钮：**同步到开发板**（地址没变就跳过、不碰串口）和**写入指定地址**，从手机或别的电脑也能点。需要 `pyserial`（`venv/bin/pip install pyserial`，或 `pip install 'jarvis-gateway[serial]'`）。打开串口会让开发板复位数秒，因此只在地址确实变化时才写入；机制与排错见 [开发板网关地址自动同步](docs/开发板网关地址自动同步.md)。
 
 ---
 
