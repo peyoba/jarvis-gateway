@@ -60,7 +60,7 @@ function context(options = {}) {
   }
   const sandbox = {
     document: {
-      getElementById: element, querySelectorAll: () => [],
+      getElementById: element, querySelectorAll: () => [], querySelector: () => null,
       createElement: () => element("created-node-" + (++nodeID)),
       hidden: false, addEventListener: (name, cb) => { events["document:" + name] = cb; },
     },

@@ -106,6 +106,12 @@ The firmware stores the gateway address in NVS (`hatch.host`); when your Mac's L
 
 The 开发板地址 panel on the dashboard exposes the same two actions (**同步到开发板** skips the serial write when the address already matches, **写入指定地址** takes a typed address), so any phone or laptop on the same Wi-Fi can fix the board. Requires `pyserial` (`venv/bin/pip install pyserial`, or `pip install 'jarvis-gateway[serial]'`). Opening the serial port resets the board for a few seconds, so a write only happens when the address actually changed; see [the sync guide (Chinese)](docs/开发板网关地址自动同步.md) for details.
 
+### 7. Optional: control the service from the browser console
+
+Everything the menu-bar app can do is also on the dashboard's **服务控制** (Service Control) panel, so the same commands work from a phone or another laptop: start / restart / stop, the login-autostart toggle, "open log folder", "open Accessibility settings", and a live tail of the gateway / whisper / ip_guard / autostart / control logs. The header line mirrors the menu-bar tooltip (`网关运行中 · 识别就绪 · 数据在线 · 模式 分流`).
+
+Both entries stay usable at the same time; the panel is a duplicate, not a replacement. `POST /service` is asynchronous (202 + `busy` 409 while an action runs) and `GET /logs?name=…&lines=120` is read-only. **Stopping or restarting kills the process that serves this page**, so both ask for confirmation first, and after a stop the page cannot start it again — use `./jarvis start` or the menu bar. Turning autostart off only removes the LaunchAgent and disables the label; it never `unload`s the job that is serving you.
+
 ---
 
 ## Architecture Overview

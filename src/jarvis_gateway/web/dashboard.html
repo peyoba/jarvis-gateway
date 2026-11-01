@@ -84,6 +84,28 @@
   .empty{padding:26px 10px;text-align:center;color:var(--faint);font-size:13px}
   footer{margin-top:24px;color:var(--faint);font-size:12px;line-height:1.9}
   code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#0b1425;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#cbd5e1}
+  /* 服务控制：本地启停 + 登录自启 + 日志尾巴 */
+  .btn{
+    padding:9px 15px;border-radius:10px;border:1px solid var(--line);background:#0b1425;
+    color:var(--text);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;
+  }
+  .btn:hover:enabled{border-color:#334155;transform:translateY(-1px)}
+  .btn:disabled{opacity:.45;cursor:default}
+  .btn.primary{border-color:rgba(96,165,250,.55);background:rgba(96,165,250,.16)}
+  .btn.danger{color:#fca5a5;border-color:rgba(248,113,113,.45);background:rgba(248,113,113,.1)}
+  .svc-line{
+    margin:-4px 0 14px;font-size:12px;color:var(--faint);
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.2px;
+  }
+  .svc-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+  details.logs{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
+  details.logs summary{cursor:pointer;font-size:12px;color:var(--muted);letter-spacing:.5px;outline:none}
+  details.logs .log-bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+  #log-body{
+    margin:12px 0 0;max-height:280px;overflow:auto;padding:10px 12px;
+    background:#060a12;border:1px solid var(--line);border-radius:10px;
+    font:12px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd5e1;white-space:pre-wrap;
+  }
   @media (max-width:760px){
     .cards,.grid4{grid-template-columns:1fr 1fr}
     .modes{grid-template-columns:1fr 1fr}
@@ -147,6 +169,41 @@
       <button id="board-set" style="padding:10px 16px;border-radius:10px;border:0;cursor:pointer">写入指定地址</button>
       <span id="board-status" class="hint">就绪</span>
     </div>
+  </section>
+
+  <section class="panel">
+    <h2>服务控制<span class="hint">菜单栏 App 里的启动 / 停止 / 重启 / 登录自启，这里都能点</span></h2>
+    <div class="svc-line" id="svc-line">正在读取服务状态…</div>
+    <div class="grid4">
+      <div><span>网关</span><strong id="svc-gateway">—</strong></div>
+      <div><span>累计运行</span><strong id="svc-uptime">—</strong></div>
+      <div><span>登录自启</span><strong id="svc-autostart">—</strong></div>
+      <div><span>最近操作</span><strong id="svc-last">—</strong></div>
+    </div>
+    <div class="svc-actions">
+      <button class="btn primary" id="svc-start">启动服务</button>
+      <button class="btn" id="svc-restart">重启服务</button>
+      <button class="btn danger" id="svc-stop">停止服务</button>
+      <button class="btn" id="svc-auto">关闭登录自启</button>
+      <button class="btn" id="svc-open-logs">打开日志目录</button>
+      <button class="btn" id="svc-open-ax">辅助功能设置</button>
+      <span class="hint" id="svc-status">停止或重启会让本页断开几秒</span>
+    </div>
+    <details class="logs">
+      <summary>查看日志</summary>
+      <div class="log-bar">
+        <select id="log-name" class="btn">
+          <option value="gateway">网关 jarvis_gateway.log</option>
+          <option value="whisper">识别 whisper_server.log</option>
+          <option value="ip_guard">IP 守护 ip_guard.log</option>
+          <option value="autostart">登录自启 autostart.log</option>
+          <option value="control">控制台操作 control.log</option>
+        </select>
+        <button class="btn" id="log-refresh">刷新日志</button>
+        <span class="hint" id="log-status">展开后自动读取末尾 120 行</span>
+      </div>
+      <pre id="log-body"></pre>
+    </details>
   </section>
 
   <!-- Virtual Browser Mic Panel for Hardware-Free Testing -->
@@ -266,6 +323,11 @@
     $("tokens").textContent = (data.tokens_str || "--") + " Token";
     $("weather").textContent = data.weather || "--";
     $("addr").textContent = "http://" + (d.lan_ip || "127.0.0.1") + ":" + gwPort + "/";
+    // 与菜单栏 App 头部同一句话，放在服务面板里一眼能看到网关整体状态。
+    $("svc-line").textContent = "网关" + (gw.online ? "运行中" : "离线") +
+      " · 识别" + (asr.online ? "就绪" : "预热中") +
+      " · 数据" + (data.online ? "在线" : "离线") +
+      " · 模式 " + (MODE_LABEL[gw.mode] || gw.mode || "-");
 
     var box = $("recent");
     box.textContent = "";
@@ -384,6 +446,110 @@
 
   $("board-sync").addEventListener("click", function(){ pushBoard(""); });
   $("board-set").addEventListener("click", function(){ pushBoard(($("board-input").value || "").trim()); });
+
+  // --- 服务控制：与菜单栏 App 同样的动作，全部走 /service ---
+  var ACTION_LABEL = {
+    start:"启动服务", stop:"停止服务", restart:"重启服务",
+    autostart_on:"开启登录自启", autostart_off:"关闭登录自启"
+  };
+
+  function renderService(s){
+    s = s || {};
+    var auto = s.autostart || {};
+    $("svc-gateway").textContent = "运行中 · PID " + (s.pid || "-");
+    $("svc-uptime").textContent = fmtUptime(s.uptime || 0);
+    $("svc-autostart").textContent = auto.enabled
+      ? (auto.loaded ? "已开启 · 已加载" : "已开启")
+      : "未开启";
+    $("svc-auto").textContent = auto.enabled ? "关闭登录自启" : "开启登录自启";
+
+    var last = s.last || {};
+    if (!last.at){
+      $("svc-last").textContent = "—";
+    } else {
+      $("svc-last").textContent = (ACTION_LABEL[last.action] || last.action) + " " + last.at;
+      $("svc-last").title = last.ok ? "已执行" : ("失败：" + (last.detail || "未知原因"));
+    }
+
+    var busy = !!s.busy;
+    $("svc-start").disabled = busy;
+    $("svc-restart").disabled = busy;
+    $("svc-stop").disabled = busy;
+    $("svc-auto").disabled = busy;
+    if (busy && $("svc-status").textContent.indexOf("正在") !== 0){
+      $("svc-status").textContent = "正在执行上一次操作…";
+    }
+  }
+
+  async function refreshService(){
+    try{
+      var res = await apiFetch("/service");
+      if (res.ok) renderService(await res.json());
+    }catch(e){ /* 网关未起时静默，主面板已报错 */ }
+  }
+
+  async function servicePost(payload, note){
+    $("svc-status").textContent = note || "正在提交…";
+    try{
+      var res = await apiFetch("/service", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      var data = await res.json();
+      if (data.error){
+        $("svc-status").textContent = data.detail || data.error;
+      } else if (payload.open){
+        $("svc-status").textContent = "已在本机打开";
+      } else {
+        $("svc-status").textContent = "已发出：" + (ACTION_LABEL[data.action] || data.action);
+      }
+    }catch(err){
+      $("svc-status").textContent = "请求失败：" + err.message;
+    }
+    refreshService();
+  }
+
+  $("svc-start").addEventListener("click", function(){ servicePost({ action: "start" }, "正在启动服务…"); });
+  $("svc-restart").addEventListener("click", function(){
+    if (confirm("重启会断开本页几秒，随后自动恢复。继续？")) servicePost({ action: "restart" }, "正在重启服务…");
+  });
+  $("svc-stop").addEventListener("click", function(){
+    if (confirm("停止后本页就点不动了，需要回终端执行 ./jarvis start。继续？")) servicePost({ action: "stop" }, "正在停止服务…");
+  });
+  $("svc-auto").addEventListener("click", function(){
+    var turnOn = $("svc-auto").textContent.indexOf("开启") === 0;
+    if (!turnOn && !confirm("关闭后下次登录不再自动启动，当前服务继续运行。继续？")) return;
+    servicePost({ autostart: turnOn }, turnOn ? "正在开启登录自启…" : "正在关闭登录自启…");
+  });
+  $("svc-open-logs").addEventListener("click", function(){ servicePost({ open: "logs" }); });
+  $("svc-open-ax").addEventListener("click", function(){ servicePost({ open: "accessibility" }); });
+
+  async function loadLog(){
+    var name = $("log-name").value;
+    $("log-status").textContent = "读取中…";
+    try{
+      var res = await apiFetch("/logs?name=" + encodeURIComponent(name) + "&lines=120");
+      var data = await res.json();
+      if (data.error){
+        $("log-status").textContent = data.detail || data.error;
+        return;
+      }
+      var lines = data.lines || [];
+      $("log-body").textContent = data.empty ? "（还没有这个日志，服务运行后会生成）" : lines.join("\n");
+      $("log-body").scrollTop = $("log-body").scrollHeight;
+      $("log-status").textContent = "末尾 " + lines.length + " 行 · " +
+        new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    }catch(err){
+      $("log-status").textContent = "读取失败：" + err.message;
+    }
+  }
+
+  $("log-refresh").addEventListener("click", loadLog);
+  var logPanel = document.querySelector("details.logs");
+  if (logPanel){
+    logPanel.addEventListener("toggle", function(){ if (logPanel.open) loadLog(); });
+  }
 
   // --- Browser Virtual Microphone: capture raw 16 kHz / 16-bit / mono PCM ---
   // The gateway expects headerless PCM. MediaRecorder produces WebM/Opus, so we
@@ -628,8 +794,10 @@
 
   refresh();
   refreshBoard();
+  refreshService();
   setInterval(refresh, 3000);
   setInterval(refreshBoard, 4000);
+  setInterval(refreshService, 5000);
 })();
 </script>
 </body>

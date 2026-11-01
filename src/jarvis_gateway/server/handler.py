@@ -12,6 +12,7 @@ import json
 import os
 import re
 import struct
+import subprocess
 import time
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler
@@ -210,6 +211,33 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(server.board.snapshot())
             return
 
+        # 服务控制：菜单栏 App 里的启动 / 停止 / 重启 / 登录自启，网页上也能点。
+        if path == "/service":
+            if not self._check_auth():
+                return
+            snap = server.service.snapshot(
+                pid=os.getpid(),
+                port=server.port,
+                uptime=int(time.time() - state.start_time),
+            )
+            self._send_json(snap)
+            return
+
+        if path == "/logs":
+            if not self._check_auth():
+                return
+            name = (qs.get("name") or ["gateway"])[0]
+            try:
+                lines = int((qs.get("lines") or ["60"])[0])
+            except ValueError:
+                lines = 60
+            payload = server.service.log_tail(name, lines)
+            if payload.get("error") == "unknown_log":
+                self._send_json(payload, status=400)
+                return
+            self._send_json(payload)
+            return
+
         # 2. System status (contains recent dictation text, so protect it when
         # auth is configured; /ping and /mode?simple=1 stay open for the board).
         if path == "/status":
@@ -357,6 +385,73 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(result)
 
+    def _handle_service_post(self):
+        """菜单栏里的动作：启动/停止/重启、登录自启、打开日志目录与辅助功能设置。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        if length > 4096:
+            self._reject(413, "request body too large")
+            return
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            self._reject(400, "invalid JSON body")
+            return
+        if not isinstance(body, dict):
+            self._reject(400, "invalid JSON body")
+            return
+
+        control = self.gateway_server.service
+        action = str(body.get("action", "") or "")
+        if action:
+            result = control.action(action)
+            if result.get("error") == "busy":
+                self._send_json(result, status=409)
+            elif result.get("error"):
+                self._send_json(result, status=400)
+            else:
+                self._send_json(result, status=202)
+            return
+
+        if "autostart" in body:
+            name = "autostart_on" if body.get("autostart") else "autostart_off"
+            result = control.action(name)
+            if result.get("error") == "busy":
+                self._send_json(result, status=409)
+            elif result.get("error"):
+                self._send_json(result, status=400)
+            else:
+                self._send_json(result, status=202)
+            return
+
+        target = str(body.get("open", "") or "")
+        if target:
+            opened = self._open_local(target)
+            if opened == "":
+                self._send_json({"opened": target})
+            else:
+                self._send_json({"error": opened}, status=400)
+            return
+
+        self._reject(400, "missing action")
+
+    def _open_local(self, target: str) -> str:
+        """返回空串表示成功，否则是错误代码。"""
+        if target == "logs":
+            path = str(self.gateway_server.service.log_dir)
+        elif target == "accessibility":
+            path = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        else:
+            return "unknown_target"
+        try:
+            subprocess.run(["open", path], check=False, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return "open_failed"
+        return ""
+
     def _handle_mode_post(self, qs):
         if not self._mutation_allowed():
             return
@@ -400,6 +495,9 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
             return
         if path == "/board":
             self._handle_board_post()
+            return
+        if path == "/service":
+            self._handle_service_post()
             return
         if path not in ("/chat", "/type"):
             self._send_json({"error": "endpoint not found"}, status=404)

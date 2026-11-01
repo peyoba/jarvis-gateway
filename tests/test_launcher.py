@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 import runpy
 import sys
 from pathlib import Path
@@ -246,3 +247,48 @@ def test_autostart_uses_selected_config_without_copying_secrets(tmp_path, monkey
     data = (tmp_path / "test.plist").read_bytes()
     assert b"synthetic-test-secret" not in data
     assert plistlib.loads(data)["EnvironmentVariables"]["JARVIS_CONFIG"] == str(config)
+
+
+def test_autostart_off_never_unloads_the_running_job(tmp_path, monkeypatch):
+    """控制台上关闭自启时，提供服务的就是这个作业：不能 unload，否则页面跟着断。"""
+    launcher = runpy.run_path(str(ROOT / "jarvis"))
+    auto = launcher["cmd_autostart"]
+    label = launcher["LABEL"]
+    plist = tmp_path / "test.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    monkeypatch.setitem(auto.__globals__, "PLIST_PATH", plist)
+    monkeypatch.setitem(auto.__globals__, "LOG_DIR", tmp_path / "logs")
+    run = Mock(return_value=Mock(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr("subprocess.run", run)
+
+    assert auto(copy.deepcopy(DEFAULT_CONFIG), "off") == 0
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert not plist.exists()
+    assert ["launchctl", "disable", "gui/%d/%s" % (os.getuid(), label)] in calls
+    assert not any("unload" in call for call in calls)
+
+
+def test_autostart_on_is_idempotent_when_job_is_loaded(tmp_path, monkeypatch):
+    launcher = runpy.run_path(str(ROOT / "jarvis"))
+    auto = launcher["cmd_autostart"]
+    label = launcher["LABEL"]
+    config = tmp_path / "chosen.json"
+    config.write_text("{}", encoding="utf-8")
+    monkeypatch.setitem(auto.__globals__, "CONFIG_PATH", config)
+    monkeypatch.setitem(auto.__globals__, "PLIST_PATH", tmp_path / "test.plist")
+    monkeypatch.setitem(auto.__globals__, "LOG_DIR", tmp_path / "logs")
+
+    def fake_run(cmd, **kwargs):
+        listing = "%d\t0\t%s\n" % (os.getpid(), label)
+        return Mock(returncode=0, stdout=listing if cmd[:2] == ["launchctl", "list"] else "", stderr="")
+
+    run = Mock(side_effect=fake_run)
+    monkeypatch.setattr("subprocess.run", run)
+
+    assert auto(copy.deepcopy(DEFAULT_CONFIG), "on", config_path=config) == 0
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert ["launchctl", "enable", "gui/%d/%s" % (os.getuid(), label)] in calls
+    # 已在运行时不再 load/unload，避免把当前服务杀掉
+    assert not any(call[:2] in (["launchctl", "load"], ["launchctl", "unload"]) for call in calls)

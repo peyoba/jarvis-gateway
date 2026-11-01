@@ -22,6 +22,7 @@ from jarvis_gateway.config import validate_config
 from jarvis_gateway.llm.client import LLMClientManager
 from jarvis_gateway.server.board import BoardLink
 from jarvis_gateway.server.handler import JarvisHTTPHandler
+from jarvis_gateway.server.service import ServiceControl
 from jarvis_gateway.services.token_service import TokenService
 from jarvis_gateway.services.weather_service import WeatherService
 from jarvis_gateway.state import GatewayState
@@ -130,6 +131,9 @@ class UnifiedGatewayServer:
         # 开发板地址联动：Web 控制台在此触发串口写入，不需要单独的菜单栏 App
         self.run_dir = Path(project_root or ip_sync.ROOT) / "run"
         self.board = BoardLink(run_dir=self.run_dir)
+
+        # 服务控制：控制台上就能启动/停止/重启、开关登录自启、看日志尾巴。
+        self.service = ServiceControl(project_root or ip_sync.ROOT)
 
         # Whisper ASR
         wh_cfg = config.get("whisper", {})

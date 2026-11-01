@@ -614,17 +614,18 @@ def cmd_autostart(cfg, action, config_path=None):
         return 0
 
     if action == "off":
-        if PLIST_PATH.exists():
-            subprocess.run(["launchctl", "unload", "-w", str(PLIST_PATH)],
-                           capture_output=True, text=True)
-            try:
-                PLIST_PATH.unlink()
-            except OSError as e:
-                print(f"{YELLOW}配置文件删除失败（{e}），请手动删除：{PLIST_PATH}{RESET}")
-                return 1
-            print(f"{GREEN}✓ 已关闭开机自启{RESET}")
-        else:
-            print("本来就没有开启")
+        # 只摘掉配置文件并禁用标签，不 unload 正在运行的作业：控制台里点
+        # 「关闭登录自启」时，提供服务的就是这个作业，卸掉会把页面一起打死。
+        try:
+            PLIST_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print(f"{YELLOW}配置文件删除失败（{e}），请手动删除：{PLIST_PATH}{RESET}")
+            return 1
+        subprocess.run(["launchctl", "disable", f"gui/{os.getuid()}/{LABEL}"],
+                       capture_output=True, text=True)
+        print(f"{GREEN}✓ 已关闭开机自启{RESET}（当前服务继续运行，下次登录不再自动启动）")
         return 0
 
     # launchd/Finder 不继承交互式 shell。不要把令牌复制进 plist。
@@ -670,6 +671,15 @@ def cmd_autostart(cfg, action, config_path=None):
         print(f'  cp "{fallback}" ~/Library/LaunchAgents/')
         print(f"  launchctl load -w ~/Library/LaunchAgents/{LABEL}.plist")
         return 1
+
+    # 已经在运行就只更新配置文件：unload 会连带杀掉当前服务（控制台就断线了）。
+    listing = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    subprocess.run(["launchctl", "enable", f"gui/{os.getuid()}/{LABEL}"],
+                   capture_output=True, text=True)
+    if LABEL in (listing.stdout or ""):
+        print(f"{GREEN}✓ 已开启开机自启{RESET}（无需重载，当前服务继续运行）")
+        print(f"  {PLIST_PATH}")
+        return 0
 
     subprocess.run(["launchctl", "unload", str(PLIST_PATH)], capture_output=True, text=True)
     result = subprocess.run(["launchctl", "load", "-w", str(PLIST_PATH)],

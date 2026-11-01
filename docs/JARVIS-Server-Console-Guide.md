@@ -197,12 +197,23 @@ JARVIS 为用户提供了从**现代化 Web 页面**、**macOS 沉浸式原生�
    - **同步到开发板**：等价于 `./jarvis ip-sync`；地址与板内一致时后端直接跳过，不打开串口、不复位板子。
    - **写入指定地址**：填一个地址再点，等价于 `./jarvis ip-sync --ip …`；非法地址在打开串口之前就被拒绝（HTTP 400）。
    - 写入在后端线程里执行（`POST /board`），页面每 4 秒轮询 `GET /board`，写的过程中两个按钮禁用，结束后提示「已写入 …，板子正在重新联网」。串口同一时间只能被一个程序占用，因此并发请求以 409 拒绝。
+7. **服务控制面板 (Service Control)**：
+   - 第一行与菜单栏 App 头部完全同一句话：`网关运行中 · 识别就绪 · 数据在线 · 模式 分流`，不用切窗口就知道整体状态。
+   - 四格只读值：**网关**（`运行中 · PID 12345`）、**累计运行**、**登录自启**（`已开启 / 未开启`）、**最近操作**（如 `重启 · 12:04:31 · 完成`）。
+   - 六个按钮覆盖菜单栏的全部服务操作：
+     - **启动服务 / 重启服务 / 停止服务**：等价于 `./jarvis start|restart|stop`，对应 `POST /service {"action": "start|restart|stop"}`。后端派生子进程执行、立刻返回 202，页面随后自动刷新到新状态；动作进行中再点会拿到 409（提示「操作进行中」）。
+     - **开启/关闭登录自启**：等价于 `./jarvis autostart on|off`。关闭时只删除 LaunchAgent 并 `launchctl disable`，**不会 unload**——否则正在提供这个页面的服务会被一并杀掉。
+     - **打开日志目录 / 辅助功能设置**：等价于菜单栏的「打开日志目录」「打开辅助功能设置」，由 `POST /service {"open": "logs|accessibility"}` 调起 Finder / 系统设置的辅助功能面板。
+   - **查看日志**（折叠面板）：下拉切换 `gateway / whisper / ip_guard / autostart / control`，通过 `GET /logs?name=…&lines=120` 取尾部 120 行，等宽字体、自动滚到最新一行，「刷新日志」可手动重取。
+   - 安全提示：**停止或重启会让本页断开几秒**，两个动作都会先弹确认框；停止之后页面无法再把自己叫醒，需要用 `./jarvis start` 或菜单栏 App 恢复。
 
 ---
 
 ### 3.2 macOS 原生菜单栏 App (`Jarvis.app`)
 
 工程源码位于 `build/main.swift`，基于 Swift 与 Cocoa 框架编写，免除终端黑框的困扰，以原生姿态融入 macOS 体验。
+
+> 这一节的每一项服务操作在 Web 控制台的「服务控制」面板里都有对应按钮，两个入口可以同时使用：菜单栏适合随手点，控制台适合远程或手机访问，互不影响。
 
 ```
 [菜单栏声波图标 ∿]
@@ -426,6 +437,8 @@ sequenceDiagram
 - `POST /chat` 或 `POST /type`：ESP32 录音上报通道，16 kHz / 16-bit / 单声道 PCM 或 WAV；请求体上限 8 MiB，解码后最长 120 秒。
 - `GET /token-stats`：OpenToken 今日汇总、各工具明细。
 - `GET /weather`：当前气温、天气描述、湿度与城市中文标签。
+- `GET /service`：服务快照（PID、端口、运行时长、是否正在操作、登录自启状态、最近一次操作、可用日志名）；`POST /service` 接受 `{"action": "start|restart|stop|autostart_on|autostart_off"}`（202 已派发；进行中 409 `busy`；未知动作 400 `unknown_action`）或 `{"open": "logs|accessibility"}`（200 已调起）。
+- `GET /logs?name=<gateway|whisper|ip_guard|autostart|control>&lines=120`：日志尾部内容；`lines` 限制在 1–200，未知名字返回 400 `unknown_log`，文件尚未生成时返回 `empty: true`。
 - 旧版独立 `:8080` 仅在 `gateway.enable_legacy_data_port` 为 `true` 时监听，并复用上述数据路径。
 
 #### 鉴权（可选，共享局域网建议开启）
