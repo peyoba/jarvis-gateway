@@ -98,6 +98,11 @@
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.2px;
   }
   .svc-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+  .field{
+    flex:1;min-width:220px;padding:9px 12px;border-radius:10px;border:1px solid var(--line);
+    background:#0b1425;color:var(--text);font-family:inherit;font-size:13px;
+  }
+  .field::placeholder{color:var(--faint)}
   details.logs{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
   details.logs summary{cursor:pointer;font-size:12px;color:var(--muted);letter-spacing:.5px;outline:none}
   details.logs .log-bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
@@ -162,11 +167,10 @@
       <div><span>串口</span><strong id="board-port">—</strong></div>
       <div><span>最近一次</span><strong id="board-last">—</strong></div>
     </div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px">
-      <button id="board-sync" style="padding:10px 16px;border-radius:10px;border:0;cursor:pointer">同步到开发板</button>
-      <input id="board-input" placeholder="手动指定，例如 192.168.0.102" autocomplete="off"
-             style="flex:1;min-width:220px;padding:10px 12px;border-radius:10px;border:1px solid #3a3f4b;background:#171a21;color:#e8eaf0">
-      <button id="board-set" style="padding:10px 16px;border-radius:10px;border:0;cursor:pointer">写入指定地址</button>
+    <div class="svc-actions">
+      <button id="board-sync" class="btn primary">同步到开发板</button>
+      <input id="board-input" class="field" placeholder="手动指定，例如 192.168.0.102" autocomplete="off">
+      <button id="board-set" class="btn">写入指定地址</button>
       <span id="board-status" class="hint">就绪</span>
     </div>
   </section>
@@ -230,10 +234,9 @@
 
   <section class="panel">
     <h2>访问令牌<span class="hint">如果 config.json 配置了 gateway.auth_token，请填写后才能录音与切换模式</span></h2>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-      <input id="auth-token" type="password" placeholder="可选：Bearer / X-Jarvis-Token" autocomplete="off"
-             style="flex:1;min-width:240px;padding:10px 12px;border-radius:10px;border:1px solid #3a3f4b;background:#171a21;color:#e8eaf0">
-      <button id="save-token" style="padding:10px 16px;border-radius:10px;border:0;cursor:pointer">保存到本机</button>
+    <div class="svc-actions">
+      <input id="auth-token" class="field" type="password" placeholder="可选：Bearer / X-Jarvis-Token" autocomplete="off">
+      <button id="save-token" class="btn">保存到本机</button>
       <span id="token-status" class="hint">未设置</span>
     </div>
   </section>
