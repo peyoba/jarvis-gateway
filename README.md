@@ -108,9 +108,13 @@ The 开发板地址 panel on the dashboard exposes the same two actions (**同�
 
 ### 7. Optional: control the service from the browser console
 
-Everything the menu-bar app can do is also on the dashboard's **服务控制** (Service Control) panel, so the same commands work from a phone or another laptop: start / restart / stop, the login-autostart toggle, "open log folder", "open Accessibility settings", and a live tail of the gateway / whisper / ip_guard / autostart / control logs. The header line mirrors the menu-bar tooltip (`网关运行中 · 识别就绪 · 数据在线 · 模式 分流`).
+The dashboard (`http://<mac-ip>:18888/`) is one page in a warm-sand light theme: a hero card with the current-mode orb, three KPI tiles and the four-mode segmented switcher; three service-health cards (gateway / Whisper / token+weather); the **服务控制** (Service Control) panel; the **开发板链路** (board address) panel; the recent-turns table; a collapsible read-only log tail; and two repository-only cards for the browser microphone and the access token. It polls `GET /status` every 3 s, `GET /board` every 4 s and `GET /service` every 5 s, and only fetches logs when you expand the panel.
+
+Everything the menu-bar app can do is also on the 服务控制 panel, so the same commands work from a phone or another laptop: start / restart / stop, the login-autostart toggle, "open log folder", "open Accessibility settings", and a live tail of the gateway / whisper / ip_guard / autostart / control logs. The hero line mirrors the menu-bar tooltip (`网关运行中 · 识别就绪 · 数据在线 · 模式 分流`); clicking a mode button sends `POST /mode` with a JSON body, and the board's screen label follows within about two seconds.
 
 Both entries stay usable at the same time; the panel is a duplicate, not a replacement. `POST /service` is asynchronous (202 + `busy` 409 while an action runs) and `GET /logs?name=…&lines=120` is read-only. **Stopping or restarting kills the process that serves this page**, so both ask for confirmation first, and after a stop the page cannot start it again — use `./jarvis start` or the menu bar. Turning autostart off only removes the LaunchAgent and disables the label; it never `unload`s the job that is serving you.
+
+Two extra cards only exist in this repository build: **网页麦克风** records from the browser (hold the button or the space bar, up to 60 s) and posts 16 kHz / 16-bit mono PCM to `POST /chat`; **访问令牌** stores the `gateway.auth_token` in that browser's `localStorage`, and any request that comes back 401 prompts once and retries. Mutating endpoints stay POST-only, and with a token configured every request needs it.
 
 ---
 
