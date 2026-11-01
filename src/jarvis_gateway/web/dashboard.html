@@ -537,7 +537,8 @@
       }
       var lines = data.lines || [];
       $("log-body").textContent = data.empty ? "（还没有这个日志，服务运行后会生成）" : lines.join("\n");
-      $("log-body").scrollTop = $("log-body").scrollHeight;
+      var body = $("log-body");
+      requestAnimationFrame(function(){ body.scrollTop = body.scrollHeight; });
       $("log-status").textContent = "末尾 " + lines.length + " 行 · " +
         new Date().toLocaleTimeString("zh-CN", { hour12: false });
     }catch(err){
