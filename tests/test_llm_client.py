@@ -25,6 +25,9 @@ class _FakeClient:
     async def __aexit__(self, *args):
         self.closed = True
 
+    async def close(self):
+        self.closed = True
+
     async def create(self, **kwargs):
         self.calls.append(kwargs)
         try:

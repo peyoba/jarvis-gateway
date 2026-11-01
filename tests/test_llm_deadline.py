@@ -43,7 +43,7 @@ def test_real_sdk_drip_response_is_cancelled_and_next_request_works(method):
             try:
                 for offset in range(0, len(body), step):
                     if slow and offset:
-                        time.sleep(0.045)  # 不触发 0.2s 读取空闲 timeout，但总耗时约 0.63s。
+                        time.sleep(0.1)  # 不触发 1s 读取空闲 timeout，但总耗时约 1.4s，稳定越过总预算。
                     self.wfile.write(body[offset:offset + step])
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
@@ -68,10 +68,10 @@ def test_real_sdk_drip_response_is_cancelled_and_next_request_works(method):
             pass
 
     cfg = {
-        "total_timeout": 0.2,
+        "total_timeout": 1.0,
         "primary": {
             "api_key": "synthetic-test-only", "base_url": url,
-            "model": "test-model", "timeout": 0.2,
+            "model": "test-model", "timeout": 1.0,
         },
         "fallback": {},
     }
@@ -82,7 +82,8 @@ def test_real_sdk_drip_response_is_cancelled_and_next_request_works(method):
         failed = getattr(manager, method)("本机测试请求内容")
         elapsed = time.monotonic() - started
         assert getattr(failed, "error", getattr(failed, "reason", None)) == "llm_timeout"
-        assert elapsed < 0.45, f"0.2s 总预算被突破：{elapsed:.3f}s"
+        # 冷启动建连约 0.25s，1s 预算留足余量，同时仍验证总预算硬截止。
+        assert elapsed < 1.3, f"1s 总预算被突破：{elapsed:.3f}s"
         assert failed.usage.calls == 1 and failed.usage.incomplete
         assert disconnected.wait(1), "取消后没有关闭真实 HTTP 连接"
         assert all(client.is_closed() for client in clients)

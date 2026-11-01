@@ -87,7 +87,18 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         """True when a browser tells us the request is cross-site (CSRF guard)."""
         return (self.headers.get("Sec-Fetch-Site", "") or "").lower() == "cross-site"
 
+    def _release_turn_slot(self):
+        """在写出响应字节之前释放槽位，否则客户端拿到 200 时槽位还占着，紧接着的请求会被误判为并发。"""
+        if not getattr(self, "_turn_slot", False):
+            return
+        self._turn_slot = False
+        try:
+            self.gateway_server.turn_lock.release()
+        except RuntimeError:
+            pass
+
     def _reject(self, status: int, message: str):
+        self._release_turn_slot()
         body = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -364,10 +375,11 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         if not self.gateway_server.turn_lock.acquire(blocking=False):
             self._reject(429, "gateway busy; retry after the current turn completes")
             return
+        self._turn_slot = True
         try:
             self._audio_post(qs)
         finally:
-            self.gateway_server.turn_lock.release()
+            self._release_turn_slot()
 
     def _audio_post(self, qs):
         t_req = time.monotonic()
@@ -531,6 +543,7 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
             error=error, polish=meta["polish"], llm_usage=meta["llm_usage"],
             action_results=meta["action_results"],
         )
+        self._release_turn_slot()
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(payload)))

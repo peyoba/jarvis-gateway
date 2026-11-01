@@ -67,6 +67,29 @@ class _UsageCounter:
         return LLMUsage(self.calls, self.total_tokens, self.estimated, self.incomplete)
 
 
+async def _close_client(client, timeout: float = 2.0) -> None:
+    """关闭客户端；外层在这一刻再次取消也不能打断，否则连接会留到垃圾回收才断开。"""
+    closer = getattr(client, "aclose", None) or getattr(client, "close", None)
+    if closer is None:
+        return
+    closing = asyncio.ensure_future(closer())
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not closing.done():
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            closing.cancel()
+            break
+        try:
+            await asyncio.wait({closing}, timeout=remaining)
+        except asyncio.CancelledError:
+            # 当前任务已被取消：继续等关闭完成，取消由调用方继续向外传播。
+            continue
+    try:
+        closing.exception()
+    except BaseException:
+        pass
+
+
 class LLMClientManager:
     def __init__(
         self,
@@ -95,24 +118,26 @@ class LLMClientManager:
         ]
 
     async def _call_channel(self, cfg, messages, parameters, timeout, usage):
-        # 不能跨 asyncio.run 复用连接池；上下文退出（包括取消）会关闭真实 I/O。
-        async with self._client_factory(
+        # 不能跨 asyncio.run 复用连接池；结束时显式关闭，取消也要等连接真正断开。
+        client = self._client_factory(
             api_key=cfg["api_key"], base_url=cfg["base_url"],
             timeout=timeout, max_retries=0,
-        ) as client:
+        )
+        try:
             usage.calls += 1
-            try:
-                response = await client.chat.completions.create(
-                    model=cfg["model"], messages=messages, timeout=timeout, **parameters,
-                )
-                text = response.choices[0].message.content or ""
-                if not isinstance(text, str):
-                    raise ValueError("unsupported model response")
-                usage.record(response, messages, text)
-                return text.strip()
-            except BaseException:
-                usage.incomplete = True
-                raise
+            response = await client.chat.completions.create(
+                model=cfg["model"], messages=messages, timeout=timeout, **parameters,
+            )
+            text = response.choices[0].message.content or ""
+            if not isinstance(text, str):
+                raise ValueError("unsupported model response")
+            usage.record(response, messages, text)
+            return text.strip()
+        except BaseException:
+            usage.incomplete = True
+            raise
+        finally:
+            await _close_client(client)
 
     async def _try_channels(self, channels, messages, parameters, deadline, usage, normalize):
         error = "llm_unavailable"
