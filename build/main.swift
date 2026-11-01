@@ -252,6 +252,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        menu.addItem(makeItem("同步网关地址到开发板", #selector(syncBoardHost)))
+        menu.addItem(makeItem("手动指定网关地址…", #selector(promptBoardHost)))
+
+        menu.addItem(.separator())
+
         autostartItem = makeItem("登录时自动启动服务", #selector(toggleAutostart))
         menu.addItem(autostartItem)
 
@@ -348,6 +353,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// Mac 的局域网地址变了以后，把新地址写进开发板的 NVS（hatch.host）。
+    /// 串口一打开开发板会复位一次，所以只在地址确实变化时才有必要操作。
+    @objc func syncBoardHost() {
+        runCLI(["ip-sync"], label: "同步开发板地址")
+    }
+
+    @objc func promptBoardHost() {
+        let alert = NSAlert()
+        alert.messageText = "手动指定网关地址"
+        alert.informativeText = "把指定的地址写进开发板；板子不在本机插着时会提示失败。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "写入")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.placeholderString = "例如 192.168.0.102"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty {
+            NSSound.beep()
+            return
+        }
+        runCLI(["ip-sync", "--ip", value], label: "写入开发板地址")
     }
 
     @objc func toggleAutostart() {

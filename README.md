@@ -94,6 +94,18 @@ Mode changes use `POST /mode?set=raw` or `POST /toggle-mode`. Legacy GET mutatio
 >
 > After editing configuration, restart when convenient. `./jarvis stop` can still stop identity-verified, launcher-managed processes if configuration is invalid or their ports changed; unknown processes are preserved and reported. Starting with changed ports cannot overwrite a still-running managed process record.
 
+### 6. Optional: push the gateway address to the board
+
+The firmware stores the gateway address in NVS (`hatch.host`); when your Mac's LAN address changes, the board silently loses the gateway. With the board attached over USB you can rewrite it:
+
+```bash
+./jarvis ip-sync                  # write the current LAN address (skips when unchanged)
+./jarvis ip-sync --ip 192.168.0.102 --port /dev/cu.usbserial-10
+./jarvis ip-guard start           # optional: background daemon that rewrites on change
+```
+
+Requires `pyserial` (`venv/bin/pip install pyserial`, or `pip install 'jarvis-gateway[serial]'`). Opening the serial port resets the board for a few seconds, so a write only happens when the address actually changed; see [the sync guide (Chinese)](docs/开发板网关地址自动同步.md) for details.
+
 ---
 
 ## Architecture Overview

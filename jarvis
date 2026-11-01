@@ -12,6 +12,8 @@ Jarvis Gateway 启动器
     ./jarvis open      打开浏览器控制台
     ./jarvis logs      跟踪日志
     ./jarvis autostart 开机自启（on/off/status）
+    ./jarvis ip-sync   把网关地址写进开发板（Mac IP 变了就跑一次）
+    ./jarvis ip-guard  网关地址守护（start/stop/status，可选）
     ./jarvis doctor    环境自检
 
 只依赖 Python 标准库，可在任意 Python 3.9+ 下运行；
@@ -476,6 +478,12 @@ def cmd_status(cfg):
     else:
         line("数据", True, "已合并进主端口 :%d" % gw_port)
 
+    guard = _ip_guard_alive()
+    if guard:
+        line("地址", True, f"守护 PID {guard['pid']}  已同步 {_synced_address() or '未记录'}")
+    else:
+        line("地址", True, f"已同步 {_synced_address() or '未记录'}（守护未运行，可用 jarvis ip-guard start）")
+
     if status:
         print("-" * 58)
         mode = status["gateway"]["mode"]
@@ -514,6 +522,86 @@ def cmd_logs(cfg, which, follow):
         cmd.append("-f")
     cmd.append(str(path))
     os.execvp("tail", cmd)
+
+
+def _ip_guard_pidfile():
+    return RUN_DIR / "ip_guard.pid"
+
+
+def _ip_guard_alive():
+    """返回仍在运行的 IP 守护记录；PID 复用或程序不符时视为没运行。"""
+    try:
+        record = json.loads(_ip_guard_pidfile().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    pid = record.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        return None
+    command = pid_command(pid)
+    if "jarvis_gateway.ip_sync" not in command or "guard" not in command:
+        return None
+    return record
+
+
+def _synced_address():
+    try:
+        return (RUN_DIR / "gateway_ip.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def cmd_ip_sync(args):
+    """子进程跑 ip_sync：真实串口操作放在服务用的解释器里，启动器本身保持纯标准库。"""
+    cmd = [str(VENV_PY), "-m", "jarvis_gateway.ip_sync"]
+    if args.ip:
+        cmd += ["--ip", args.ip]
+    if args.port:
+        cmd += ["--port", args.port]
+    if args.force:
+        cmd.append("--force")
+    if args.json:
+        cmd.append("--json")
+    env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
+    return subprocess.call(cmd, cwd=str(ROOT), env=env)
+
+
+def cmd_ip_guard(action):
+    record = _ip_guard_alive()
+    if action == "status":
+        if record:
+            print(f"IP 守护  {GREEN}✓ 运行中{RESET}  PID {record['pid']}  "
+                  f"已同步地址 {_synced_address() or '未记录'}")
+            return 0
+        print(f"IP 守护  {RED}✗ 未运行{RESET}（地址变化后用 jarvis ip-sync 手动同步）")
+        return 1
+
+    if action == "stop":
+        if not record:
+            print("IP 守护本来就没有在运行")
+            return 0
+        try:
+            os.killpg(record["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        _ip_guard_pidfile().unlink(missing_ok=True)
+        print(f"{GREEN}✓ 已停止 IP 守护{RESET}")
+        return 0
+
+    if record:
+        print(f"IP 守护已在运行（PID {record['pid']}）")
+        return 0
+    env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
+    proc, log_path = spawn([str(VENV_PY), "-m", "jarvis_gateway.ip_sync", "guard"], "ip_guard.log", env=env)
+    RUN_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    payload = {"pid": proc.pid, "started": pid_started(proc.pid), "log": str(log_path)}
+    path = _ip_guard_pidfile()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
+    print(f"{GREEN}✓ IP 守护已启动{RESET}（PID {proc.pid}）")
+    print(f"  日志  {log_path}")
+    return 0
 
 
 def cmd_autostart(cfg, action, config_path=None):
@@ -667,6 +755,16 @@ def main(argv=None):
     p_auto.add_argument("action", nargs="?", default="status",
                         choices=["on", "off", "status"])
 
+    p_ip = sub.add_parser("ip-sync", help="把网关地址写进开发板")
+    p_ip.add_argument("--ip", help="要写入的地址，缺省取本机地址")
+    p_ip.add_argument("--port", help="串口设备，缺省自动查找")
+    p_ip.add_argument("--force", action="store_true", help="地址没变也重新写入")
+    p_ip.add_argument("--json", action="store_true", help="以 JSON 输出")
+
+    p_guard = sub.add_parser("ip-guard", help="网关地址守护")
+    p_guard.add_argument("action", nargs="?", default="status",
+                         choices=["start", "stop", "status"])
+
     args = parser.parse_args(argv)
     if args.command == "stop":
         return cmd_stop(config_path=args.config)
@@ -674,6 +772,10 @@ def main(argv=None):
         return cmd_autostart(None, args.action)
     if args.command == "logs":
         return cmd_logs(None, args.which, args.follow)
+    if args.command == "ip-sync":
+        return cmd_ip_sync(args)
+    if args.command == "ip-guard":
+        return cmd_ip_guard(args.action)
     try:
         config_path = selected_config_path(args.config)
         cfg = load_config(config_path)

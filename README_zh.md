@@ -94,6 +94,18 @@ export JARVIS_AUTH_TOKEN="$(openssl rand -hex 24)"
 
 配置失效或端口改动后，`./jarvis stop` 仍可按身份校验停止本启动器记录的受管进程；无法确认身份的进程会保留并报告。旧端口服务尚在运行时，直接 `start` 不会覆盖旧 PID 记录，请按需使用 `restart`。
 
+### 6. 可选：网关地址变化时同步给开发板
+
+固件把网关地址存在 NVS 的 `hatch.host` 里，Mac 的局域网地址一变（DHCP 续租、切换网络），开发板就会静默失联。板子插在 USB 上时可以直接把新地址写回去：
+
+```bash
+./jarvis ip-sync                  # 取本机地址写入，地址没变自动跳过
+./jarvis ip-sync --ip 192.168.0.102 --port /dev/cu.usbserial-10
+./jarvis ip-guard start           # 可选：后台守护，地址一变就自动重写
+```
+
+需要 `pyserial`（`venv/bin/pip install pyserial`，或 `pip install 'jarvis-gateway[serial]'`）。打开串口会让开发板复位数秒，因此只在地址确实变化时才写入；机制与排错见 [开发板网关地址自动同步](docs/开发板网关地址自动同步.md)。
+
 ---
 
 ## 架构总览
