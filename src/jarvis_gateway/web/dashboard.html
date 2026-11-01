@@ -132,6 +132,23 @@
     </div>
   </section>
 
+  <section class="panel">
+    <h2>开发板地址<span class="hint">板子只记得上一次写入的网关地址；换了网络点一下就好，不用另开 App</span></h2>
+    <div class="grid4">
+      <div><span>Mac 局域网地址</span><strong id="board-lan">—</strong></div>
+      <div><span>板子已写入</span><strong id="board-written">—</strong></div>
+      <div><span>串口</span><strong id="board-port">—</strong></div>
+      <div><span>最近一次</span><strong id="board-last">—</strong></div>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px">
+      <button id="board-sync" style="padding:10px 16px;border-radius:10px;border:0;cursor:pointer">同步到开发板</button>
+      <input id="board-input" placeholder="手动指定，例如 192.168.0.102" autocomplete="off"
+             style="flex:1;min-width:220px;padding:10px 12px;border-radius:10px;border:1px solid #3a3f4b;background:#171a21;color:#e8eaf0">
+      <button id="board-set" style="padding:10px 16px;border-radius:10px;border:0;cursor:pointer">写入指定地址</button>
+      <span id="board-status" class="hint">就绪</span>
+    </div>
+  </section>
+
   <!-- Virtual Browser Mic Panel for Hardware-Free Testing -->
   <section class="panel">
     <h2>网页麦克风调试<span class="hint">免硬件快速体验：按住说话，松开后自动转写并键入 Mac 光标（浏览器内采样为 16 kHz PCM）</span></h2>
@@ -309,6 +326,58 @@
       refresh();
     });
   }
+
+  // --- 开发板地址：串口写入（写入期间板子会重启，约 7 秒恢复联网）---
+  function renderBoard(b){
+    b = b || {};
+    $("board-lan").textContent = b.lan_ip || "—";
+    $("board-written").textContent = b.board_host || "未写入";
+    $("board-port").textContent = b.serial_port || "未找到串口";
+    var last = b.last || {};
+    if (!last.at){
+      $("board-last").textContent = "—";
+    } else {
+      var tail = last.ok ? "成功" : "失败";
+      $("board-last").textContent = tail + " " + last.at + (last.port ? " · " + last.port : "");
+      $("board-last").title = last.detail || "";
+    }
+    $("board-sync").disabled = !!b.busy;
+    $("board-set").disabled = !!b.busy;
+    if (b.busy) $("board-status").textContent = "正在写串口，板子重启约 7 秒…";
+  }
+
+  async function refreshBoard(){
+    try{
+      var res = await apiFetch("/board");
+      if (res.ok) renderBoard(await res.json());
+    }catch(e){ /* 网关未起时静默，主面板已报错 */ }
+  }
+
+  async function pushBoard(host){
+    $("board-status").textContent = "正在提交…";
+    try{
+      var payload = host ? { host: host } : {};
+      var res = await apiFetch("/board", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      var data = await res.json();
+      if (data.error){
+        $("board-status").textContent = data.detail || data.error;
+      } else if (data.skipped){
+        $("board-status").textContent = data.host + " 已经是最新，未动串口";
+      } else {
+        $("board-status").textContent = "已开始写入 " + data.host + "…";
+      }
+    }catch(err){
+      $("board-status").textContent = "请求失败: " + err.message;
+    }
+    refreshBoard();
+  }
+
+  $("board-sync").addEventListener("click", function(){ pushBoard(""); });
+  $("board-set").addEventListener("click", function(){ pushBoard(($("board-input").value || "").trim()); });
 
   // --- Browser Virtual Microphone: capture raw 16 kHz / 16-bit / mono PCM ---
   // The gateway expects headerless PCM. MediaRecorder produces WebM/Opus, so we
@@ -552,7 +621,9 @@
   });
 
   refresh();
+  refreshBoard();
   setInterval(refresh, 3000);
+  setInterval(refreshBoard, 4000);
 })();
 </script>
 </body>

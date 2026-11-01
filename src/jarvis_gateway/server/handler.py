@@ -203,6 +203,13 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
             self._send_html(html)
             return
 
+        # 开发板地址联动：只读快照，写入走 POST /board
+        if path == "/board":
+            if not self._check_auth():
+                return
+            self._send_json(server.board.snapshot())
+            return
+
         # 2. System status (contains recent dictation text, so protect it when
         # auth is configured; /ping and /mode?simple=1 stay open for the board).
         if path == "/status":
@@ -325,6 +332,31 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _handle_board_post(self):
+        """把网关地址写进开发板；空 body 或 {"host": ""} 表示用本机局域网地址。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        if length > 4096:
+            self._reject(413, "request body too large")
+            return
+        raw = self.rfile.read(length) if length > 0 else b""
+        host = ""
+        if raw:
+            try:
+                host = str(json.loads(raw.decode("utf-8")).get("host", "") or "")
+            except (UnicodeDecodeError, ValueError, AttributeError):
+                self._reject(400, "invalid JSON body")
+                return
+        result = self.gateway_server.board.sync(host)
+        if result.get("error") == "busy":
+            self._send_json(result, status=409)
+        elif result.get("error"):
+            self._send_json(result, status=400)
+        else:
+            self._send_json(result)
+
     def _handle_mode_post(self, qs):
         if not self._mutation_allowed():
             return
@@ -365,6 +397,9 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
         if path == "/toggle-mode":
             mode = self.gateway_server.state.toggle_mode()
             self._send_json({"current_mode": mode, "mode": mode})
+            return
+        if path == "/board":
+            self._handle_board_post()
             return
         if path not in ("/chat", "/type"):
             self._send_json({"error": "endpoint not found"}, status=404)

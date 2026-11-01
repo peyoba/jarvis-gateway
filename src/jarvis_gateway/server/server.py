@@ -14,12 +14,13 @@ from pathlib import Path
 from socketserver import TCPServer
 from typing import Any, Dict, Optional
 
-from jarvis_gateway import __version__
+from jarvis_gateway import __version__, ip_sync
 from jarvis_gateway.asr.manager import ASRManager
 from jarvis_gateway.asr.whisper_cli import WhisperCliASR
 from jarvis_gateway.asr.whisper_server import WhisperServerASR
 from jarvis_gateway.config import validate_config
 from jarvis_gateway.llm.client import LLMClientManager
+from jarvis_gateway.server.board import BoardLink
 from jarvis_gateway.server.handler import JarvisHTTPHandler
 from jarvis_gateway.services.token_service import TokenService
 from jarvis_gateway.services.weather_service import WeatherService
@@ -125,6 +126,10 @@ class UnifiedGatewayServer:
 
         # Runtime State
         self.state = GatewayState(default_mode=default_mode, speak_typed=speak_typed, root_dir=project_root)
+
+        # 开发板地址联动：Web 控制台在此触发串口写入，不需要单独的菜单栏 App
+        self.run_dir = Path(project_root or ip_sync.ROOT) / "run"
+        self.board = BoardLink(run_dir=self.run_dir)
 
         # Whisper ASR
         wh_cfg = config.get("whisper", {})
