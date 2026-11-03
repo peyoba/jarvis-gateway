@@ -21,6 +21,8 @@ Audio is processed locally and never uploaded; only text is sent to the LLM you 
 - ⚡ **Zero-Hardware Browser Mic Testing**: Don't have an ESP32 yet? Simply open the web console and hold Spacebar to talk through your laptop mic and test instant typing!
 - 🧠 **Long-Term Memory & Self-Evolution**: Dialog mode recalls recent turns and learned facts offline (no embeddings), and periodically distills the conversation into durable facts plus a persona summary.
 - 🎛️ **Web Console & macOS Menubar App**: Monitor services, switch modes, view token estimates and latency in real time.
+- 📝 **Voice Notes**: Say "记一下，明早看结果" and the sentence lands in your Obsidian inbox file, one line per note, no app switching.
+- 🖼️ **Screen Push**: Say "画个用量图" and the gateway renders a 320×240 JPEG of today's token usage; the board polls `/screen` and shows it.
 - 🔒 **Security First**: No `shell=True` execution, strict command whitelisting, and optional Bearer/Header token authentication for shared LANs.
 
 ---
@@ -176,6 +178,26 @@ System control is reported as successful only after a zero-exit execution. Model
 - **Console card**: 「长期记忆」 shows fact count, context turns and consolidation count, plus a manual 「立即整理记忆」 button.
 - **HTTP**: \`GET /memory?summary=1\` (public counters), \`GET /memory\` (full snapshot, authenticated), \`POST /memory\` with \`{"action": "consolidate" | "add" | "clear"}\`.
 - **Storage**: \`~/.jarvis/memory\` (\`facts.json\`, \`persona.md\`, \`meta.json\`, \`history.jsonl\`), override with \`JARVIS_MEMORY_DIR\`; writes are atomic, files \`0600\` inside a \`0700\` directory. Config lives under the \`memory\` key.
+
+---
+
+## Voice Notes & Screen Push
+
+Two conveniences that answer before the LLM is called at all, so they cost no tokens.
+
+**Voice notes** — say 「记一下，明早看结果」 and the rest of the sentence is appended to a Markdown file, one bullet per note under a `## YYYY-MM-DD` heading:
+
+- Default path `~/Documents/Obsidian Vault/90-收件箱/语音速记.md`; override with `JARVIS_VOICE_NOTE` (full file path).
+- The same sentence on the same day is recorded once; a bare trigger answers 「要记什么呢？我在听。」
+- Nothing leaves the machine: the confirmation is spoken locally.
+
+**Screen push** — say 「画个用量图」 and the gateway renders a 320×240 baseline JPEG and leaves it for the board to collect:
+
+- `GET /screen` returns `{"url": "…", "row": -1}`, or `{"url": ""}` when nothing is queued.
+- `GET /charts/<name>.jpg` serves the image (`no-store`, basename-sanitised, `.jpg`/`.png` only). JPEG is what the firmware decodes; the raw-RGB565 path expects the exact panel geometry, so stick to baseline JPEG.
+- The queue holds one image: a newer chart replaces one the board never collected, so an offline board can't show stale data.
+- Charts go to `run/charts/` (override `JARVIS_CHART_DIR`); the newest 20 are kept and anything older than 10 minutes is pruned. The usage service URL is `JARVIS_TOKEN_STATS_URL` (default `http://127.0.0.1:8080/token-stats`).
+- Needs `pip install -e ".[charts]"`. Without Pillow the module still imports and every other mode keeps working; only rendering fails, with a readable message.
 
 ---
 

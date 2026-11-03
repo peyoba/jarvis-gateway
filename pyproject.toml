@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis-gateway"
-version = "2.3.1"
+version = "2.4.0"
 description = "The Open-Source Local AI Desktop Brain & Voice-Typing Gateway for Hardware Companions (ESP32, IoT & Beyond)."
 readme = "README.md"
 authors = [{ name = "Jarvis Contributors" }]
@@ -33,6 +33,9 @@ dependencies = [
 [project.optional-dependencies]
 serial = [
     "pyserial>=3.5",
+]
+charts = [
+    "pillow>=10.0",
 ]
 dev = [
     "pytest>=7.0.0",

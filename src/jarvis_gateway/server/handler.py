@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
-from jarvis_gateway import __version__
+from jarvis_gateway import __version__, ip_sync
 from jarvis_gateway.actions.injector import CursorInjector
 from jarvis_gateway.actions.system import (
     ActionResult,
@@ -36,9 +36,21 @@ from jarvis_gateway.audio.converter import (
     wav_bytes_to_pcm16,
 )
 from jarvis_gateway.llm.client import LLMUsage
+from jarvis_gateway.services import screen_push, voice_notes
 
 if TYPE_CHECKING:
     from jarvis_gateway.server.server import UnifiedGatewayServer
+
+
+_CHART_HINTS = ("图表", "看图", "画个图", "画张图", "曲线", "用量图")
+
+
+def _wants_chart(text: str) -> bool:
+    """这句话是不是要一张图推到板子屏幕上。"""
+    if any(k in text for k in _CHART_HINTS):
+        return True
+    # Whisper 常把「用量图」听成「用辆图」之类，兜底：有「图」且带「画/看/量/表」。
+    return "图" in text and any(k in text for k in ("画", "看", "量", "表"))
 
 
 class JarvisHTTPHandler(BaseHTTPRequestHandler):
@@ -237,6 +249,37 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(payload, status=400)
                 return
             self._send_json(payload)
+            return
+
+        # 屏上推送：板子每 3 秒问一次有没有图要显示。
+        if path == "/screen":
+            item = screen_push.pop_image()
+            if item is None:
+                self._send_json({"url": ""})
+            else:
+                self._send_json({"url": item["url"], "row": item.get("row", -1)})
+            return
+
+        # 推送出去的图：板子用 image_fetch 直接下载这里。
+        if path.startswith("/charts/"):
+            name = os.path.basename(path[len("/charts/"):])
+            full = os.path.join(screen_push.CHART_DIR, name)
+            ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+            if not name or ext not in ("png", "jpg", "jpeg") or not os.path.isfile(full):
+                self._reject(404, "not found")
+                return
+            try:
+                with open(full, "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                self._reject(500, "cannot read chart")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg" if ext in ("jpg", "jpeg") else "image/png")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
 
         # 长期记忆：summary=1 只给计数（控制台轮询），完整快照含对话与事实需鉴权。
@@ -672,11 +715,19 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
                 error = "injection_failed"
             speak = server.state.speak_typed
         else:
-            # 记忆指令（记住/忘掉/记得什么/整理记忆）在本地即时处理，不占用模型。
+            # 记忆指令（记住/忘掉/记得什么/整理记忆）、速记、屏上推送都在本地回答，不占用模型。
             memory_cmd = server.memory.handle_command(utterance) if utterance else None
+            note_reply = voice_notes.capture(utterance) if utterance and memory_cmd is None else None
+            chart_reply = None
+            if utterance and memory_cmd is None and note_reply is None and _wants_chart(utterance):
+                try:
+                    chart_reply = screen_push.show_tokens(ip_sync.lan_ip(), server.port)
+                except Exception as exc:  # 画图失败不能拖垮这一轮对话
+                    print("[!] 屏上推送失败: %s" % exc, flush=True)
+                    chart_reply = "图表没画出来，我记在本机日志里了。"
             plan = SystemActionExecutor.plan_fast_command(
                 utterance, server.token_service, server.weather_service,
-            ) if utterance and memory_cmd is None else None
+            ) if utterance and memory_cmd is None and note_reply is None and chart_reply is None else None
             if not utterance:
                 reply = "我在，请说。"
             elif memory_cmd is not None:
@@ -686,6 +737,10 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
                         target=server.memory.consolidate, kwargs={"force": True},
                         daemon=True, name="JarvisMemoryManual",
                     ).start()
+            elif note_reply is not None:
+                reply = note_reply
+            elif chart_reply is not None:
+                reply = chart_reply
             elif plan is not None:
                 reply, action = plan
                 if action:
