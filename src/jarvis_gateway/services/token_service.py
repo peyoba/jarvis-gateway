@@ -6,6 +6,7 @@ Probes OpenToken if available; gracefully falls back to local session token esti
 from __future__ import annotations
 
 import copy
+import json
 import os
 import shutil
 import subprocess
@@ -17,7 +18,11 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 if TYPE_CHECKING:
     from jarvis_gateway.llm.client import LLMUsage
 
-REFERENCE_DAILY_TOKENS = 5_000_000  # UI progress reference only, not an account balance
+# UI progress reference only, not an account balance. Sized for the "with cache"
+# basis used by the TokenRank leaderboard default (cache reads dominate usage).
+REFERENCE_DAILY_TOKENS = 50_000_000
+
+TOKEN_BASIS = "with_cache"  # input + output + cache_read + cache_write
 
 
 def format_tokens(n: int) -> str:
@@ -54,6 +59,8 @@ class TokenService:
         self._local_incomplete = False
         self._llm_calls = 0
         self._external: Optional[Dict[str, int]] = None
+        self._external_normalized: Optional[Dict[str, int]] = None
+        self._external_cache: Dict[str, int] = {}
         self._external_update = 0.0
         self._external_ok = False
 
@@ -79,6 +86,8 @@ class TokenService:
             self._local_incomplete = False
             self._llm_calls = 0
             self._external = None
+            self._external_normalized = None
+            self._external_cache = {}
             self._external_ok = False
             self._external_update = 0.0
 
@@ -106,7 +115,62 @@ class TokenService:
             self._local_incomplete |= usage.incomplete
             self._local_update = time.time()
 
-    def _fetch_opentoken_stats(self) -> Optional[Dict[str, int]]:
+    def _fetch_opentoken_usage(self) -> Optional[Dict[str, Any]]:
+        """Read today's usage from `opentoken preview --json` in both bases.
+
+        "with_cache" (input + output + cache_read + cache_write) matches the
+        TokenRank leaderboard default; "normalized" (input + output) is what the
+        CLI's text table prints. Returns None when the bridge is unavailable.
+        """
+        if not self.opentoken_bin:
+            return None
+        today_str = date.today().isoformat()
+        try:
+            p = subprocess.run([self.opentoken_bin, "preview", "--json"],
+                               capture_output=True, text=True, timeout=15)
+            if p.returncode != 0:
+                return None
+            payload = json.loads(p.stdout)
+        except Exception:
+            return None
+        rows = payload.get("rows") or []
+        if not rows:
+            return None
+        tools: Dict[str, int] = {}
+        normalized: Dict[str, int] = {}
+        totals = {k: 0 for k in ("with_cache", "normalized", "input", "output",
+                                 "cache_read", "cache_write")}
+        for row in rows:
+            if not isinstance(row, dict) or row.get("date") != today_str:
+                continue
+            name = row.get("tool") or "unknown"
+            try:
+                inp = int(row.get("input", 0) or 0)
+                out = int(row.get("output", 0) or 0)
+                cache_read = int(row.get("cache_read", 0) or 0)
+                cache_write = int(row.get("cache_write", 0) or 0)
+                norm = int(row.get("normalized", inp + out) or 0)
+            except (TypeError, ValueError):
+                continue
+            if min(inp, out, cache_read, cache_write, norm) < 0:
+                continue
+            with_cache = inp + out + cache_read + cache_write
+            tools[name] = tools.get(name, 0) + with_cache
+            normalized[name] = normalized.get(name, 0) + norm
+            totals["with_cache"] += with_cache
+            totals["normalized"] += norm
+            totals["input"] += inp
+            totals["output"] += out
+            totals["cache_read"] += cache_read
+            totals["cache_write"] += cache_write
+        if not tools:
+            return None
+        tools["TOTAL"] = totals["with_cache"]
+        normalized["TOTAL"] = totals["normalized"]
+        return {"tools": tools, "normalized": normalized, "totals": totals}
+
+    def _fetch_opentoken_stats_text(self) -> Optional[Dict[str, int]]:
+        """Legacy fallback: the text table only reports the normalized metric."""
         if not self.opentoken_bin:
             return None
         today_str = date.today().isoformat()
@@ -145,14 +209,31 @@ class TokenService:
             pass
         return None
 
+    def _fetch_opentoken_stats(self) -> Optional[Dict[str, int]]:
+        """With-cache tool totals, falling back to the normalized text table."""
+        usage = self._fetch_opentoken_usage()
+        if usage:
+            return dict(usage["tools"])
+        return self._fetch_opentoken_stats_text()
+
     def _poll_once(self):
         day = date.today()
-        raw_stats = self._fetch_opentoken_stats()
+        usage = self._fetch_opentoken_usage()
+        if usage:
+            raw_stats: Optional[Dict[str, int]] = dict(usage["tools"])
+            normalized = dict(usage["normalized"])
+            cache_totals = dict(usage["totals"])
+        else:
+            raw_stats = self._fetch_opentoken_stats_text()
+            normalized = dict(raw_stats) if raw_stats else {}
+            cache_totals = {}
         with self._lock:
             self._reset_day()
             self._external_ok = raw_stats is not None and day == self._day
             if self._external_ok:
                 self._external = dict(raw_stats)
+                self._external_normalized = normalized
+                self._external_cache = cache_totals
                 self._external_update = time.time()
 
     def _worker(self):
@@ -175,8 +256,21 @@ class TokenService:
             labels = [f"总计  {format_tokens(total)}"]
             labels.extend(f"{k}  {format_tokens(v)}" for k, v in active[:3])
             labels.extend(["空闲"] * (4 - len(labels)))
+            normalized_tools = dict(self._external_normalized or tools) if external else dict(tools)
+            cache_totals = dict(self._external_cache or {}) if external else {}
+            total_normalized = (
+                normalized_tools.get("TOTAL", total) if external else total
+            )
             return copy.deepcopy({
                 "total": total, "total_str": format_tokens(total),
+                "total_normalized": total_normalized,
+                "total_normalized_str": format_tokens(total_normalized),
+                "basis": TOKEN_BASIS if external else "session",
+                "input": int(cache_totals.get("input", 0)),
+                "output": int(cache_totals.get("output", 0)),
+                "cache_read": int(cache_totals.get("cache_read", 0)),
+                "cache_write": int(cache_totals.get("cache_write", 0)),
+                "tools_normalized": normalized_tools,
                 "pct": min(100, int(total / REFERENCE_DAILY_TOKENS * 100)),
                 "line1": f"{active[0][0]}: {format_tokens(active[0][1])}" if active else "全部空闲",
                 "line2": " | ".join(f"{k}: {format_tokens(v)}" for k, v in active[1:3]) or "全部空闲",
@@ -225,6 +319,9 @@ class TokenService:
             "ai_model": stats.get("active_tool", "Jarvis"),
             "today_tokens": stats.get("total", 0),
             "today_tokens_str": stats.get("total_str", "--"),
+            "today_tokens_normalized_str": stats.get("total_normalized_str", "--"),
+            "basis": stats.get("basis", TOKEN_BASIS),
+            "cache_read": stats.get("cache_read", 0),
             "pct": stats.get("pct", 0),
             "title": "今日用量",
             "account_balance": "--",
