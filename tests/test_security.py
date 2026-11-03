@@ -270,7 +270,7 @@ def test_audio_intent_contracts(gateway, monkeypatch, mode, heard, seconds, type
                         lambda text: calls["polish"].append(text) or PolishResult(
                             "润色结果", polished=True, usage=LLMUsage(calls=1, total_tokens=17)))
     monkeypatch.setattr(gateway.llm_manager, "chat_result",
-                        lambda text: calls["chat"].append(text) or ChatResult(
+                        lambda text, **kw: calls["chat"].append(text) or ChatResult(
                             "模拟回答", usage=LLMUsage(calls=1, total_tokens=17)))
     monkeypatch.setattr(CursorInjector, "inject_text",
                         lambda text: calls["injected"].append(text) or True)
@@ -377,7 +377,7 @@ def test_failed_system_actions_reach_wire_and_recent_status(
     heard = "锁屏" if source == "fast" else "帮我执行锁屏操作"
     monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: (heard, 0, "fake"))
     monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
-    monkeypatch.setattr(gateway.llm_manager, "chat_result", lambda text: ChatResult(
+    monkeypatch.setattr(gateway.llm_manager, "chat_result", lambda text, **kw: ChatResult(
         "已为您锁定屏幕。", ("lock_screen",), usage=LLMUsage(calls=1, total_tokens=17),
     ))
     run = Mock(return_value=SimpleNamespace(returncode=1, stdout="private-output", stderr="private-error"))
@@ -409,7 +409,7 @@ def test_missing_action_result_is_not_treated_as_success(gateway, monkeypatch):
 def test_multi_action_failure_stops_remaining_actions_and_success_claim(gateway, monkeypatch):
     monkeypatch.setattr(gateway.asr_manager, "transcribe", lambda path: ("执行电脑控制操作", 0, "fake"))
     monkeypatch.setattr(gateway.tts, "synthesize", lambda text: bytes(3200))
-    monkeypatch.setattr(gateway.llm_manager, "chat_result", lambda text: ChatResult(
+    monkeypatch.setattr(gateway.llm_manager, "chat_result", lambda text, **kw: ChatResult(
         "已全部执行成功。", ("volume_up", "music_play", "lock_screen"),
     ))
     execute = Mock(side_effect=[ActionResult(True, returncode=0), ActionResult(False, "action_failed", 1)])

@@ -13,6 +13,7 @@ import os
 import re
 import struct
 import subprocess
+import threading
 import time
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler
@@ -238,6 +239,17 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
+        # 长期记忆：summary=1 只给计数（控制台轮询），完整快照含对话与事实需鉴权。
+        if path == "/memory":
+            summary_only = qs.get("summary") == ["1"]
+            if not summary_only and not self._check_auth():
+                return
+            if summary_only:
+                self._send_json({"summary": server.memory.summary()})
+            else:
+                self._send_json(server.memory.snapshot())
+            return
+
         # 2. System status (contains recent dictation text, so protect it when
         # auth is configured; /ping and /mode?simple=1 stay open for the board).
         if path == "/status":
@@ -438,6 +450,47 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
 
         self._reject(400, "missing action")
 
+    def _handle_memory_post(self):
+        """记忆维护动作：立即整理一次、手动添加事实、清空。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        if length > 8192:
+            self._reject(413, "request body too large")
+            return
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            self._reject(400, "invalid JSON body")
+            return
+        if not isinstance(body, dict):
+            self._reject(400, "invalid JSON body")
+            return
+        memory = self.gateway_server.memory
+        action = str(body.get("action", "") or "")
+        if action == "consolidate":
+            threading.Thread(
+                target=memory.consolidate, kwargs={"force": True}, daemon=True,
+                name="JarvisMemoryManual",
+            ).start()
+            self._send_json({"status": "started"}, status=202)
+            return
+        if action == "add":
+            text = str(body.get("text", "") or "").strip()
+            if len(text) < 2:
+                self._send_json({"error": "text too short"}, status=400)
+                return
+            fact, created = memory.add_fact(text, importance=5, source="console")
+            self._send_json({"status": "added" if created else "exists", "fact": fact.as_dict()})
+            return
+        if action == "clear":
+            memory.clear()
+            self._send_json({"status": "cleared"})
+            return
+        self._reject(400, "missing action")
+
     def _open_local(self, target: str) -> str:
         """返回空串表示成功，否则是错误代码。"""
         if target == "logs":
@@ -498,6 +551,9 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
             return
         if path == "/service":
             self._handle_service_post()
+            return
+        if path == "/memory":
+            self._handle_memory_post()
             return
         if path not in ("/chat", "/type"):
             self._send_json({"error": "endpoint not found"}, status=404)
@@ -616,11 +672,20 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
                 error = "injection_failed"
             speak = server.state.speak_typed
         else:
+            # 记忆指令（记住/忘掉/记得什么/整理记忆）在本地即时处理，不占用模型。
+            memory_cmd = server.memory.handle_command(utterance) if utterance else None
             plan = SystemActionExecutor.plan_fast_command(
                 utterance, server.token_service, server.weather_service,
-            ) if utterance else None
+            ) if utterance and memory_cmd is None else None
             if not utterance:
                 reply = "我在，请说。"
+            elif memory_cmd is not None:
+                reply, wants_consolidation = memory_cmd
+                if wants_consolidation:
+                    threading.Thread(
+                        target=server.memory.consolidate, kwargs={"force": True},
+                        daemon=True, name="JarvisMemoryManual",
+                    ).start()
             elif plan is not None:
                 reply, action = plan
                 if action:
@@ -629,7 +694,12 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
                     if not outcome.success:
                         reply, error = action_failure_reply(outcome), outcome.error
             else:
-                result = server.llm_manager.chat_result(utterance)
+                memory = server.memory
+                result = server.llm_manager.chat_result(
+                    utterance,
+                    history=memory.chat_history(),
+                    system_extra=memory.context_block(utterance),
+                )
                 reply, usage = result.reply, result.usage
                 if not result.success:
                     error = result.error or "llm_unavailable"
@@ -648,6 +718,13 @@ class JarvisHTTPHandler(BaseHTTPRequestHandler):
                     reply = "电脑控制已完成。" if action_results else "我在，请说。"
             speak = True
         server.token_service.add_llm_usage(usage)
+        if not is_typing and not error and utterance:
+            # 先落地这一轮，再考虑后台整理；整理永远不挡回复。
+            server.memory.record_exchange(
+                utterance, reply, mode,
+                [str(a.get("action", "")) for a in action_results if a.get("action")],
+            )
+            server.memory.note_turn()
         self._send_turn(
             heard, reply, typed, mode, "error" if error else "ok", error, speak, t_req,
             polish_info=polish_info, usage=usage, action_results=action_results,

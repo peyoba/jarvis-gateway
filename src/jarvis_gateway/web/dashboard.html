@@ -289,6 +289,16 @@
   .tok-row input::placeholder{color:var(--faint);font-family:inherit}
   .tok-row input:focus{border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-soft)}
   .row.degraded .m{color:var(--warn);background:var(--warn-soft);border-color:var(--warn-line)}
+
+  /* ---------- 长期记忆 ---------- */
+  .mem-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+  .mem-stats div{padding:12px 14px;border-radius:13px;border:1px solid var(--card-border);background:var(--inner-2)}
+  .mem-stats b{display:block;font-size:21px;font-weight:800;letter-spacing:-.02em;line-height:1.2}
+  .mem-stats span{font-size:12px;color:var(--faint)}
+  .mem-facts{display:flex;flex-direction:column;gap:8px}
+  .mem-fact{display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.55}
+  .mem-fact i{width:6px;height:6px;border-radius:50%;background:var(--accent);margin-top:7px;flex:none}
+  .mem-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
 </style>
 </head>
 <body>
@@ -423,6 +433,23 @@
       <div class="table-head"><span>时间</span><span>模式</span><span>听到</span><span>回复 / 上屏</span><span>耗时</span></div>
       <div id="recent" class="recent"><div class="empty">还没有对话，按住板子说一句试试。</div></div>
       <div class="live"><i></i>正在监听板端 · 按住板子说一句即可</div>
+    </div>
+  </section>
+
+  <!-- 长期记忆 -->
+  <section class="grid">
+    <div class="card">
+      <h2><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a4 4 0 0 0-4 4v1a4 4 0 0 0-1 7.7V17a4 4 0 0 0 5 3.9"/><path d="M12 3a4 4 0 0 1 4 4v1a4 4 0 0 1 1 7.7V17a4 4 0 0 1-5 3.9"/><path d="M12 3v17.9"/><path d="M9 8h.01M15 8h.01M9 13h.01M15 13h.01"/></svg></span>长期记忆<span class="hint">对话上下文 · 自动提炼</span></h2>
+      <div class="mem-stats">
+        <div><b id="mem-facts">—</b><span>条长期事实</span></div>
+        <div><b id="mem-turns">—</b><span>轮对话上下文</span></div>
+        <div><b id="mem-evolve">—</b><span>次自我整理</span></div>
+      </div>
+      <div id="mem-facts-list" class="mem-facts"><div class="empty">还没有记住的内容，对板子说「记住：…」试试。</div></div>
+      <div class="mem-bar">
+        <button id="mem-consolidate" class="btn">立即整理记忆</button>
+        <span id="mem-status" class="note">每 6 轮对话自动整理一次</span>
+      </div>
     </div>
   </section>
 
@@ -671,6 +698,62 @@
       var res = await apiFetch("/board", { cache: "no-store" });
       if (res.ok) renderBoard(await res.json());
     }catch(err){}
+  }
+
+  // --- 长期记忆：事实数 / 上下文轮数 / 自我整理次数 ---
+  async function refreshMemory(){
+    try{
+      var res = await apiFetch("/memory?summary=1", { cache: "no-store" });
+      if (!res.ok) return;
+      var s = (await res.json()).summary || {};
+      $("mem-facts").textContent = s.facts || 0;
+      $("mem-turns").textContent = s.turns_total || 0;
+      $("mem-evolve").textContent = s.consolidations || 0;
+      var box = $("mem-facts-list");
+      var facts = s.recent_facts || [];
+      box.innerHTML = "";
+      if (!facts.length){
+        var empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "还没有记住的内容，对板子说「记住：…」试试。";
+        box.appendChild(empty);
+      } else {
+        for (var i = 0; i < facts.length; i++){
+          var row = document.createElement("div");
+          row.className = "mem-fact";
+          var dot = document.createElement("i");
+          var text = document.createElement("span");
+          text.textContent = facts[i];
+          row.appendChild(dot);
+          row.appendChild(text);
+          box.appendChild(row);
+        }
+      }
+      $("mem-status").textContent = s.last_consolidation
+        ? "上次整理 " + new Date(s.last_consolidation * 1000).toLocaleTimeString()
+        : "每 6 轮对话自动整理一次";
+    }catch(err){}
+  }
+
+  var memBtn = $("mem-consolidate");
+  if (memBtn){
+    memBtn.addEventListener("click", async function(){
+      memBtn.disabled = true;
+      $("mem-status").textContent = "正在整理…";
+      try{
+        var res = await apiFetch("/memory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "consolidate" })
+        });
+        $("mem-status").textContent = res.ok ? "已开始整理，几秒后刷新" : "整理失败（需要访问令牌？）";
+      }catch(err){
+        $("mem-status").textContent = "整理失败：" + err.message;
+      }finally{
+        memBtn.disabled = false;
+        setTimeout(refreshMemory, 3000);
+      }
+    });
   }
 
   async function pushBoard(host){
@@ -1055,9 +1138,11 @@
   refresh();
   refreshBoard();
   refreshService();
+  refreshMemory();
   setInterval(refresh, 3000);
   setInterval(refreshBoard, 4000);
   setInterval(refreshService, 5000);
+  setInterval(refreshMemory, 5000);
 })();
 </script>
 </body>

@@ -20,6 +20,7 @@ from jarvis_gateway.asr.whisper_cli import WhisperCliASR
 from jarvis_gateway.asr.whisper_server import WhisperServerASR
 from jarvis_gateway.config import validate_config
 from jarvis_gateway.llm.client import LLMClientManager
+from jarvis_gateway.memory import Memory
 from jarvis_gateway.server.board import BoardLink
 from jarvis_gateway.server.handler import JarvisHTTPHandler
 from jarvis_gateway.server.service import ServiceControl
@@ -164,6 +165,20 @@ class UnifiedGatewayServer:
         # LLM
         self.llm_manager = LLMClientManager(config.get("llm", {}))
 
+        # 长期记忆：记住对话上下文，并定期把对话提炼成事实与行为笔记
+        mem_cfg = config.get("memory", {}) or {}
+        self.memory = Memory(
+            os.environ.get("JARVIS_MEMORY_DIR") or mem_cfg.get("dir") or None,
+            complete=self._memory_complete,
+            max_facts=int(mem_cfg.get("max_facts", 240)),
+            persona_chars=int(mem_cfg.get("persona_chars", 1200)),
+            every_turns=int(mem_cfg.get("consolidate_every", 6)),
+            min_interval_sec=float(mem_cfg.get("min_interval_sec", 20.0)),
+            history_turns=int(mem_cfg.get("history_turns", 6)),
+            recall_facts=int(mem_cfg.get("recall_facts", 5)),
+            enabled=bool(mem_cfg.get("enabled", True)),
+        )
+
         # Background Services
         ds_cfg = config.get("data_service", {})
         self.token_service = TokenService(opentoken_bin=ds_cfg.get("opentoken_bin"))
@@ -179,6 +194,13 @@ class UnifiedGatewayServer:
         self.turn_lock = threading.Lock()
         self._stop_lock = threading.Lock()
         self._stopping = threading.Event()
+
+    def _memory_complete(self, messages):
+        """记忆整理用的旁路补全：独立于对话超时预算，失败只返回空串。"""
+        try:
+            return self.llm_manager.complete_text(messages, max_tokens=700, temperature=0.2)
+        except Exception:
+            return ""
 
     def is_whisper_online(self, timeout: float = 0.25) -> bool:
         try:

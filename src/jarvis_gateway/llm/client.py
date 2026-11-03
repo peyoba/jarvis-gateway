@@ -164,12 +164,12 @@ class LLMClientManager:
                 print(f"[!] LLM 通道 {name} 失败: {type(exc).__name__}", flush=True)
         return "", "", error
 
-    async def _complete(self, messages, *, normalize=None, **parameters):
+    async def _complete(self, messages, *, normalize=None, budget=None, **parameters):
         usage = _UsageCounter()
         channels = self._channels()
         if not channels:
             return "", "", "llm_unconfigured", usage.snapshot()
-        budget = float(self.config.get("total_timeout", 16))
+        budget = float(budget if budget is not None else self.config.get("total_timeout", 16))
         if budget <= 0:
             return "", "", "llm_timeout", usage.snapshot()
         deadline = self._clock() + budget
@@ -212,12 +212,30 @@ class LLMClientManager:
         """保留原有字符串接口；需要降级原因/用量时使用 polish_text_result。"""
         return self.polish_text_result(raw_text).text
 
-    async def achat_result(self, user_text: str) -> ChatResult:
+    @staticmethod
+    def _chat_messages(user_text: str, history, system_extra: str) -> List[Dict[str, str]]:
+        """系统提示 + 最近对话 + 本轮发言；超长时从最旧的对话开始丢弃。"""
+        system_prompt = CHAT_SYSTEM_PROMPT
+        if system_extra:
+            system_prompt = system_prompt.rstrip() + "\n\n" + system_extra.strip()
+        turns: List[Dict[str, str]] = []
+        for item in history or ():
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", ""))
+            content = str(item.get("content", "") or "").strip()
+            if role in ("user", "assistant") and content:
+                turns.append({"role": role, "content": content[:600]})
+        # 对话历史最多占 4000 字符，先丢最旧的整轮，避免挤掉系统提示。
+        while len(turns) > 1 and sum(len(t["content"]) for t in turns) > 4000:
+            turns = turns[2:] if len(turns) >= 2 else turns[1:]
+        return [{"role": "system", "content": system_prompt}] + turns + [
+            {"role": "user", "content": user_text or "你好"},
+        ]
+
+    async def achat_result(self, user_text: str, history=None, system_extra: str = "") -> ChatResult:
         raw_reply, channel, error, usage = await self._complete(
-            [
-                {"role": "system", "content": CHAT_SYSTEM_PROMPT},
-                {"role": "user", "content": user_text or "你好"},
-            ],
+            self._chat_messages(user_text, history, system_extra),
             max_tokens=60,
         )
         if not raw_reply:
@@ -229,8 +247,24 @@ class LLMClientManager:
         clean_reply = re.sub(r"\[ACTION:.*?\]", "", raw_reply).strip()
         return ChatResult(clean_reply, actions, usage=usage, channel=channel)
 
-    def chat_result(self, user_text: str) -> ChatResult:
-        return asyncio.run(self.achat_result(user_text))
+    def chat_result(self, user_text: str, history=None, system_extra: str = "") -> ChatResult:
+        return asyncio.run(self.achat_result(user_text, history=history, system_extra=system_extra))
+
+    async def acomplete_text(self, messages, *, max_tokens: int = 700, temperature: float = 0.2,
+                             budget: float = 20.0) -> str:
+        """通用文本补全，供记忆整理等后台任务使用；失败返回空串。"""
+        text, _channel, _error, _usage = await self._complete(
+            messages, max_tokens=max_tokens, temperature=temperature, budget=budget,
+        )
+        return text or ""
+
+    def complete_text(self, messages, *, max_tokens: int = 700, temperature: float = 0.2,
+                      budget: float = 20.0) -> str:
+        try:
+            return asyncio.run(self.acomplete_text(
+                messages, max_tokens=max_tokens, temperature=temperature, budget=budget))
+        except Exception:
+            return ""
 
     def chat(self, user_text: str) -> Tuple[str, List[str]]:
         """保留原有 (回复, 动作列表) 接口，不供生产路由推断执行状态。"""

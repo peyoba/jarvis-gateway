@@ -48,6 +48,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "speak_typed": False,
         "default_mode": "auto",  # auto | raw | polish | dialog
     },
+    "memory": {
+        # 对话长期记忆：记住上下文，并定期把对话提炼成事实与行为笔记。
+        "enabled": True,
+        "dir": "~/.jarvis/memory",
+        "history_turns": 6,
+        "recall_facts": 5,
+        "consolidate_every": 6,
+        "min_interval_sec": 20.0,
+        "max_facts": 240,
+        "persona_chars": 1200,
+    },
     "llm": {
         "total_timeout": 16.0,
         "primary": {
@@ -170,6 +181,25 @@ def validate_config(cfg: Dict[str, Any]) -> None:
     beam = cfg["whisper"].get("beam_size")
     if isinstance(beam, bool) or not isinstance(beam, int) or not 0 <= beam <= 128:
         raise ConfigError("whisper.beam_size must be an integer between 0 and 128")
+
+    memory = cfg.get("memory", {})
+    if not isinstance(memory.get("enabled"), bool):
+        raise ConfigError("memory.enabled must be a boolean")
+    if not isinstance(memory.get("dir"), str) or not memory["dir"].strip():
+        raise ConfigError("memory.dir must be a nonempty string")
+    for key, low, high in (
+        ("history_turns", 0, 40),
+        ("recall_facts", 0, 20),
+        ("consolidate_every", 1, 100),
+        ("max_facts", 10, 5000),
+        ("persona_chars", 100, 8000),
+    ):
+        value = memory.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ConfigError(f"memory.{key} must be an integer between {low} and {high}")
+    interval = memory.get("min_interval_sec")
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not 0 <= interval <= 86400:
+        raise ConfigError("memory.min_interval_sec must be a number between 0 and 86400")
 
     def number(value: Any, field: str, maximum: float, *, allow_zero: bool = False):
         if (

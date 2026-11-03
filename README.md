@@ -19,6 +19,7 @@ Audio is processed locally and never uploaded; only text is sent to the LLM you 
 - ⌨️ **Direct Cursor Injection**: Types polished text into whichever application has focus (VS Code, Slack, Obsidian, WeChat, etc.), with clipboard backup and restore.
 - 🧠 **Dual-Channel LLM Polishing**: Removes filler words ("um", "ah", stuttering), corrects homophones, and formats punctuation with automatic fallback.
 - ⚡ **Zero-Hardware Browser Mic Testing**: Don't have an ESP32 yet? Simply open the web console and hold Spacebar to talk through your laptop mic and test instant typing!
+- 🧠 **Long-Term Memory & Self-Evolution**: Dialog mode recalls recent turns and learned facts offline (no embeddings), and periodically distills the conversation into durable facts plus a persona summary.
 - 🎛️ **Web Console & macOS Menubar App**: Monitor services, switch modes, view token estimates and latency in real time.
 - 🔒 **Security First**: No `shell=True` execution, strict command whitelisting, and optional Bearer/Header token authentication for shared LANs.
 
@@ -162,6 +163,19 @@ Fast system commands (volume, music, lock screen, weather…) only run in `dialo
 Polishing skips texts of up to three characters. Missing/failed models safely fall back to raw typing; the console distinguishes AI-polished, short raw, and degraded raw results. `llm.total_timeout` (default 16 seconds) bounds the combined primary/fallback model operation and cancels its network I/O on expiry; ASR, typing and TTS have separate limits.
 
 System control is reported as successful only after a zero-exit execution. Model usage prefers provider-reported tokens; missing usage is explicitly estimated, and zero model calls add zero tokens. Failed/timed-out calls may have unknown additional charges. Local usage is gateway-session data, not a full-account bill.
+
+---
+
+## Long-Term Memory (Dialog Mode)
+
+\`dialog\` mode keeps context across utterances: the most recent exchanges are injected into every chat request, and durable facts are recalled with a dependency-free token-overlap scorer (no embeddings, no extra services).
+
+- **Say it once**: "记住：我叫老王，喜欢美式咖啡" stores a fact and answers instantly from the local store — no model call.
+- **Management commands**: "忘掉…", "你记住了什么", "整理记忆", "清空记忆".
+- **Self-evolution**: every few dialog turns the gateway asks the model to distill the recent conversation into new facts and a short persona paragraph, which then shapes later replies. Consolidation runs off the reply path, so voice latency is unaffected.
+- **Console card**: 「长期记忆」 shows fact count, context turns and consolidation count, plus a manual 「立即整理记忆」 button.
+- **HTTP**: \`GET /memory?summary=1\` (public counters), \`GET /memory\` (full snapshot, authenticated), \`POST /memory\` with \`{"action": "consolidate" | "add" | "clear"}\`.
+- **Storage**: \`~/.jarvis/memory\` (\`facts.json\`, \`persona.md\`, \`meta.json\`, \`history.jsonl\`), override with \`JARVIS_MEMORY_DIR\`; writes are atomic, files \`0600\` inside a \`0700\` directory. Config lives under the \`memory\` key.
 
 ---
 
